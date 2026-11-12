@@ -15,3 +15,4 @@
 - [ ] Statistics after recovery reflect actual new, skipped, recovered, and failed work.
 - [ ] Tests inject interruptions after each major persisted state and verify restart behavior and final equivalence with an uninterrupted run.
 
+- [ ] Recovery must retain the active embedding contract and deterministic identities; never serve incompatible or mixed-model vectors after interrupted migration.

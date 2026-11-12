@@ -1,3 +1,8 @@
+> Planning reference: the authoritative implementation specification is `.scratch/email-ai-agent-mvp/spec.md`.
+> Dense embeddings now use the official LlamaIndex FastEmbedEmbedding adapter with exact
+> Qwen/Qwen3-Embedding-0.6B FP32 ONNX, 1024 dimensions, Python 3.11–3.12 and CPUExecutionProvider.
+> Follow the canonical spec for query instructions, generation isolation and local-only migration.
+
 # Email AI Agent — MVP Specification
 
 ## Problem Statement
@@ -22,7 +27,7 @@ The project is initially intended for a single personal Gmail account. The prior
 
 ## Solution
 
-Build a locally running, read-only Email AI Agent using Python, Pydantic AI, OpenRouter, Gmail MCP, LlamaIndex, Qdrant, Ollama embeddings, and SQLite.
+Build a locally running, read-only Email AI Agent using Python, Pydantic AI, OpenRouter, Gmail MCP, LlamaIndex, Qdrant, FastEmbed Qwen3 embeddings, and SQLite.
 
 The application has two principal components.
 
@@ -30,7 +35,7 @@ The application has two principal components.
 
 A deterministic ingestion pipeline downloads Gmail messages and their attachments, extracts supported textual content, stores the source data locally, and creates a persistent hybrid search index.
 
-LlamaIndex manages document processing, chunking, retrieval, and document-context expansion. Qdrant provides vector and sparse retrieval, using the locally hosted `bge-m3` embedding model through Ollama and BM25-based sparse search.
+LlamaIndex manages document processing, chunking, retrieval, and document-context expansion. Qdrant provides vector and sparse retrieval, using the locally hosted `Qwen/Qwen3-Embedding-0.6B` embedding model through FastEmbed and BM25-based sparse search.
 
 **2. Conversational email agent**
 
@@ -85,7 +90,7 @@ Subsequent runs reuse existing local data. New messages are imported through the
                                |
                          Qdrant + BM25
                                |
-                        Ollama embeddings
+                        FastEmbed Qwen3 embeddings
 
 
            Separate Ingestion Pipeline
@@ -127,11 +132,11 @@ The ingestion pipeline operates independently of LLM reasoning.
 
 6. As a user, I want the application to verify that the selected LLM supports tool calling, so that unsupported configurations fail clearly.
 
-7. As a user, I want the application to check whether Qdrant and Ollama are available, so that I can identify missing dependencies before starting indexing.
+7. As a user, I want the application to check whether Qdrant and local FastEmbed are available, so that I can identify missing dependencies before starting indexing.
 
-8. As a user, I want the application to offer to download the required embedding model if it is missing, so that initial setup requires fewer manual operations.
+8. As a user, I want the first explicit search/reindex to download the required model to a persistent cache when missing, while startup/status avoid downloading weights.
 
-9. As a user, I want Qdrant and Ollama to run through Docker Compose, so that local infrastructure is easy to start and stop.
+9. As a user, I want Qdrant to run through Docker Compose and FastEmbed locally in Python, so that local infrastructure is easy to start and stop.
 
 10. As a user, I want clear configuration errors instead of unexplained Python tracebacks, so that I can resolve setup problems quickly.
 
@@ -373,10 +378,10 @@ The agreed components are:
 | Gmail transport | MCP over stdio |
 | RAG framework | LlamaIndex |
 | Vector database | Qdrant |
-| Embedding runtime | Ollama |
-| Embedding model | `bge-m3` |
+| Embedding runtime | LlamaIndex FastEmbedEmbedding |
+| Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
 | Sparse retrieval | BM25 |
-| Retrieval fusion | Reciprocal Rank Fusion |
+| Retrieval fusion | LlamaIndex built-in relative-score fusion |
 | Relational metadata | SQLite |
 | Local source storage | Configurable local directory |
 | Document processing | LlamaIndex readers |
@@ -629,9 +634,9 @@ Original message content must remain preserved separately.
 
 The retrieval system combines:
 
-- Dense vector similarity using `bge-m3`.
+- Dense vector similarity using `Qwen/Qwen3-Embedding-0.6B`.
 - BM25-based sparse/lexical search.
-- Reciprocal Rank Fusion for combining results.
+- LlamaIndex built-in relative-score fusion for combining results.
 
 Use the existing LlamaIndex and Qdrant integration for hybrid retrieval.
 
@@ -851,11 +856,11 @@ The chosen model must support the agent's tool-calling requirements.
 
 The application should detect configuration or model compatibility failures early where possible.
 
-The embedding model is `bge-m3` through Ollama.
+The embedding model is `Qwen/Qwen3-Embedding-0.6B` through FastEmbed.
 
 Only one generative LLM is required: the OpenRouter model.
 
-Ollama is used for embeddings, not generation.
+FastEmbed is used for embeddings, not generation.
 
 Changing the embedding model requires reindexing.
 
@@ -902,7 +907,7 @@ Transient Gmail, Qdrant, and OpenRouter errors should use bounded retries with e
 
 Respect server-provided retry instructions when available.
 
-If Qdrant or Ollama is unavailable, Gmail MCP functionality may remain usable.
+If Qdrant or local FastEmbed is unavailable, Gmail MCP functionality may remain usable.
 
 If Gmail is unavailable, the agent may continue using locally indexed information while informing the user that live email access is unavailable.
 
@@ -916,7 +921,7 @@ Detailed exception output may be enabled through a debug mode.
 
 The CLI runs as a local Python process.
 
-Only Qdrant and Ollama need to run as Docker Compose services.
+Only Qdrant runs as a Docker Compose service; FastEmbed runs in the CLI process.
 
 Persistent storage must survive ordinary container restarts and shutdowns.
 
@@ -1273,7 +1278,7 @@ Before implementing, Codex should verify the currently installed versions and pu
 - Pydantic AI's OpenRouter model support.
 - LlamaIndex's hybrid Qdrant integration.
 - Qdrant's dense and sparse configuration.
-- Ollama's `bge-m3` embedding support.
+- FastEmbed's `Qwen/Qwen3-Embedding-0.6B` embedding support.
 - LlamaIndex's document-store persistence and neighboring-node relationships.
 
 Where a documented interface differs from this specification, prefer adapting the integration to the actual library API without changing the agreed user-visible behavior.

@@ -29,7 +29,7 @@ class ControlledServices:
         self.pulled_models.append(model)
         self.current_status = ServiceStatus(
             qdrant_available=self.current_status.qdrant_available,
-            ollama_available=True,
+            fastembed_available=True,
             embedding_model_available=True,
         )
 
@@ -212,7 +212,7 @@ class InteractiveCliTests(TestCase):
         self.assertEqual(gmail.authentication_attempts, 1)
         self.assertIn("Gmail: available (reader@example.com)", stdout.getvalue())
         self.assertIn("Qdrant: unavailable", stdout.getvalue())
-        self.assertIn("Ollama: unavailable", stdout.getvalue())
+        self.assertIn("FastEmbed: unavailable", stdout.getvalue())
 
     def test_read_only_gmail_commands_search_and_open_messages_and_threads(self) -> None:
         services = ControlledServices(ServiceStatus(True, True, True))
@@ -274,7 +274,7 @@ class InteractiveCliTests(TestCase):
         self.assertIn("/status", output)
         self.assertIn("/exit", output)
         self.assertIn("Qdrant: available", output)
-        self.assertIn("Ollama: unavailable", output)
+        self.assertIn("FastEmbed: unavailable", output)
         self.assertIn("Goodbye.", output)
 
     def test_status_distinguishes_each_unavailable_service(self) -> None:
@@ -291,41 +291,15 @@ class InteractiveCliTests(TestCase):
         )
 
         self.assertIn("Qdrant: unavailable", stdout.getvalue())
-        self.assertIn("Ollama: available", stdout.getvalue())
-        self.assertIn("Embedding model bge-m3: installed", stdout.getvalue())
+        self.assertIn("FastEmbed: available", stdout.getvalue())
+        self.assertIn("Embedding model Qwen/Qwen3-Embedding-0.6B: supported", stdout.getvalue())
 
-    def test_missing_embedding_model_is_not_downloaded_without_opt_in(self) -> None:
-        services = ControlledServices(ServiceStatus(True, True, False))
+    def test_startup_reports_support_without_loading_or_downloading_model(self) -> None:
+        services = ControlledServices(ServiceStatus(True, True, True))
         stdout = StringIO()
-
-        run_application(
-            environ=VALID_ENV,
-            stdin=StringIO("n\n/exit\n"),
-            stdout=stdout,
-            stderr=StringIO(),
-            services_factory=lambda settings: services,
-            gmail_factory=lambda: ControlledGmail(AVAILABLE_GMAIL),
-        )
-
+        run_with_services(services=services, stdin=StringIO("/exit\n"), stdout=stdout)
         self.assertEqual(services.pulled_models, [])
-        self.assertIn("Download bge-m3 now? [y/N]", stdout.getvalue())
-        self.assertIn("ollama pull bge-m3", stdout.getvalue())
-
-    def test_missing_embedding_model_can_be_downloaded_by_opt_in(self) -> None:
-        services = ControlledServices(ServiceStatus(True, True, False))
-        stdout = StringIO()
-
-        run_application(
-            environ=VALID_ENV,
-            stdin=StringIO("y\n/exit\n"),
-            stdout=stdout,
-            stderr=StringIO(),
-            services_factory=lambda settings: services,
-            gmail_factory=lambda: ControlledGmail(AVAILABLE_GMAIL),
-        )
-
-        self.assertEqual(services.pulled_models, ["bge-m3"])
-        self.assertIn("Downloaded bge-m3.", stdout.getvalue())
+        self.assertIn("supported (downloaded on first search)", stdout.getvalue())
 
     def test_local_diagnostic_failure_does_not_suppress_gmail_status(self) -> None:
         services = FailingServices(ServiceStatus(False, False, False))
@@ -375,7 +349,7 @@ class InteractiveCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Gmail: unavailable", stdout.getvalue())
         self.assertIn("Qdrant: available", stdout.getvalue())
-        self.assertIn("Ollama: available", stdout.getvalue())
+        self.assertIn("FastEmbed: available", stdout.getvalue())
 
     def test_status_keeps_reporting_local_services_when_gmail_diagnostics_fail(self) -> None:
         services = ControlledServices(ServiceStatus(True, True, True))

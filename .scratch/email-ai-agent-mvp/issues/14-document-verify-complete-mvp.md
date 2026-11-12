@@ -14,3 +14,4 @@
 - [ ] Automated acceptance coverage uses the agreed CLI/application seam with synthetic mail and controlled external adapters.
 - [ ] The final verification confirms that normal operation requires no source-code edits between setup, launch, restart, and synchronization.
 
+- [ ] Document Python 3.11–3.12, CPU ONNX Runtime/Windows Visual C++ requirements, the 2.38 GB exact Qwen3 model download/cache, Qdrant-only Compose, generation migration and local-only reindex. Distinguish mocked tests from real downloaded-model/server-Qdrant verification.

@@ -15,3 +15,4 @@
 - [ ] Changing the configured embedding model requires or clearly prompts an explicit reindex.
 - [ ] Tests verify Gmail independence, source preservation, interruption recovery, stable associations, and post-rebuild search behavior.
 
+- [ ] Rebuild the exact FastEmbed Qwen/Qwen3-Embedding-0.6B FP32 1024-dimensional vectors and BM25 in the active contract collection from archived emails and persisted attachment text. A model/provider/precision/dimension/instruction change always requires rebuilding, including equal dimensions. Preserve legacy derived collections until explicit cleanup, use the matching document store, and test interrupted migration and idempotency without any Gmail access.

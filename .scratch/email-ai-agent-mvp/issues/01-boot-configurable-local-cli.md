@@ -9,8 +9,7 @@
 - [ ] The project installs reproducibly with uv using standard Python project metadata.
 - [ ] Launching the CLI validates required environment settings and reports actionable configuration errors without a raw traceback in normal mode.
 - [ ] The CLI implements `/help`, `/status`, and `/exit`, and ordinary startup reaches an interactive prompt when the minimum configuration is valid.
-- [ ] Docker Compose starts Qdrant and Ollama with persistent storage that survives ordinary container restarts.
-- [ ] `/status` distinguishes available and unavailable Qdrant and Ollama services.
-- [ ] When `bge-m3` is missing, startup offers a clear opt-in path to download it rather than downloading it silently.
+- [ ] Docker Compose starts Qdrant with persistent storage; FastEmbed runs in-process with a persistent model cache that survives ordinary container restarts.
+- [ ] `/status` distinguishes Qdrant availability and FastEmbed CPU/runtime and model-registry support.
+- [ ] Startup/status do not load weights. The first explicit search/reindex downloads the exact Qwen3 model into data/models and reports download failures clearly.
 - [ ] Automated tests exercise the CLI/application boundary with controlled service adapters and assert terminal output.
-

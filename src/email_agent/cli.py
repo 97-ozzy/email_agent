@@ -24,13 +24,14 @@ load_dotenv()
 
 HELP_TEXT = """Supported commands:
   /help    Display supported commands
-  /status  Check Gmail, Qdrant, Ollama, and the embedding model
+  /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
   /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
                 [--source email|attachment]
             Search the persistent local hybrid index
   /gmail-search QUERY  Search live Gmail
   /gmail-message ID    Open one live Gmail message
   /gmail-thread ID     Open one live Gmail conversation
+  /reindex Rebuild email vectors from local content without contacting Gmail
   /exit    Exit the application
 """
 
@@ -118,8 +119,6 @@ def run_cli(
                 settings.attachment_max_bytes,
             )
             _write_import_report(stdout, report)
-    if status.ollama_available and not status.embedding_model_available:
-        _offer_model_download(settings, services, stdin, stdout)
 
     search_backend: SearchBackend | None = None
     stdout.write("Type /help for commands.\n")
@@ -148,6 +147,16 @@ def run_cli(
                 settings.embedding_model,
                 local_problem=local_problem,
             )
+        elif command == "/reindex":
+            try:
+                from email_agent.retrieval import HybridSearchIndex
+
+                backend = HybridSearchIndex(settings, archive)
+                count = backend.refresh(force=True)
+                search_backend = backend
+                stdout.write(f"Reindexed {count} archived email bodies from local content.\n")
+            except Exception as exc:
+                stdout.write(f"Reindex unavailable: {exc}\n")
         elif command.startswith("/search"):
             try:
                 request = _parse_search_request(command)
@@ -337,13 +346,17 @@ def _write_status(
             gmail_text += f" ({gmail_status.problem})"
     stdout.write(f"Gmail: {gmail_text}\n")
     stdout.write(f"Qdrant: {'available' if status.qdrant_available else 'unavailable'}\n")
-    stdout.write(f"Ollama: {'available' if status.ollama_available else 'unavailable'}\n")
+    stdout.write(f"FastEmbed: {'available' if status.fastembed_available else 'unavailable'}\n")
     if local_problem:
         stdout.write(f"Local service diagnostics: unavailable ({local_problem})\n")
-    if not status.ollama_available:
-        model_status = "unavailable (Ollama is unavailable)"
+    if not status.fastembed_available:
+        model_status = "unavailable (FastEmbed is unavailable)"
     else:
-        model_status = "installed" if status.embedding_model_available else "missing"
+        model_status = (
+            "supported (downloaded on first search)"
+            if status.embedding_model_available
+            else "unsupported"
+        )
     stdout.write(f"Embedding model {embedding_model}: {model_status}\n")
 
 
@@ -354,7 +367,7 @@ def _checked_service_status(
     try:
         return services.status(embedding_model), None
     except Exception:
-        return ServiceStatus(False, False, False), "check Qdrant and Ollama, then retry /status"
+        return ServiceStatus(False, False, False), "check Qdrant and FastEmbed, then retry /status"
 
 
 def _checked_gmail_status(check: Callable[[], GmailStatus]) -> GmailStatus:
@@ -367,33 +380,20 @@ def _checked_gmail_status(check: Callable[[], GmailStatus]) -> GmailStatus:
         )
 
 
-def _offer_model_download(
-    settings: Settings,
-    services: ServiceAdapter,
-    stdin: TextIO,
-    stdout: TextIO,
-) -> None:
-    stdout.write(f"Download {settings.embedding_model} now? [y/N] ")
-    stdout.flush()
-    answer = stdin.readline().strip().lower()
-    if answer not in {"y", "yes"}:
-        stdout.write(
-            f"Model download skipped. Run `ollama pull {settings.embedding_model}` when ready.\n"
-        )
-        return
-
-    stdout.write(f"Downloading {settings.embedding_model} with Ollama...\n")
-    try:
-        services.pull_model(settings.embedding_model)
-    except Exception as exc:
-        stdout.write(f"Could not download {settings.embedding_model}: {exc}\n")
-        stdout.write(f"Try `ollama pull {settings.embedding_model}` manually.\n")
-        return
-    stdout.write(f"Downloaded {settings.embedding_model}.\n")
-
-
 def main() -> None:
     """Console-script entry point."""
+    if sys.argv[1:] == ["--reindex"]:
+        from email_agent.retrieval import HybridSearchIndex
+
+        try:
+            settings = Settings.from_environ(os.environ)
+            archive = SQLiteArchive(settings.data_dir)
+            count = HybridSearchIndex(settings, archive).refresh(force=True)
+            print(f"Reindexed {count} local email bodies; no Gmail access.")
+        except Exception as exc:
+            print(f"Reindex failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        return
     raise SystemExit(
         run_application(
             environ=os.environ,

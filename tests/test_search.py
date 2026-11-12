@@ -56,7 +56,7 @@ def archived_message(
 
 
 class ControlledEmbedding(BaseEmbedding):
-    """Semantic examples without an Ollama network dependency."""
+    """Semantic examples without loading real model weights."""
 
     @staticmethod
     def vector(text: str) -> list[float]:
@@ -287,7 +287,7 @@ class HybridRetrievalTests(TestCase):
 
             self.assertEqual(index.refresh(), 2)
             self.assertEqual(index.refresh(), 0)
-            self.assertEqual(client.count("email_agent_sources", exact=True).count, 2)
+            self.assertEqual(client.count(index.collection, exact=True).count, 2)
 
             semantic = index.search(SearchRequest("holiday plans", limit=1))
             exact = index.search(SearchRequest("АБВ-123", limit=1))
@@ -361,7 +361,7 @@ class HybridRetrievalTests(TestCase):
             second_client.close()
 
             self.assertEqual(results[0].gmail_message_id, "persisted")
-            self.assertTrue((Path(directory) / "index" / "docstore.json").exists())
+            self.assertTrue(second_index.docstore_path.exists())
 
     def test_empty_archive_returns_no_results(self) -> None:
         with TemporaryDirectory() as directory:
@@ -378,11 +378,11 @@ class HybridRetrievalTests(TestCase):
             client = QdrantClient(":memory:")
             index = self.make_index(directory, archive, client=client)
             index.refresh()
-            self.assertGreater(client.count("email_agent_sources", exact=True).count, 1)
+            self.assertGreater(client.count(index.collection, exact=True).count, 1)
             archive.store_message(archived_message("changed", "Invoice REPLACED-9"))
 
             self.assertEqual(index.refresh(), 1)
-            self.assertEqual(client.count("email_agent_sources", exact=True).count, 1)
+            self.assertEqual(client.count(index.collection, exact=True).count, 1)
             results = index.search(SearchRequest("REPLACED-9"))
             self.assertEqual(results[0].text, "Invoice REPLACED-9")
 
@@ -394,7 +394,9 @@ class HybridRetrievalTests(TestCase):
             archive.store_message(archived_message("budget", "Invoice details. " * 100))
             index = HybridSearchIndex(
                 Settings("key", "model", data_dir=Path(directory), search_context_tokens=5),
-                archive, client=QdrantClient(":memory:"), embed_model=ControlledEmbedding(),
+                archive,
+                client=QdrantClient(":memory:"),
+                embed_model=ControlledEmbedding(),
             )
             index.refresh()
             results = index.search(SearchRequest("invoice"))

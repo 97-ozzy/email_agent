@@ -8,14 +8,5 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:0.40.16
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-
 volumes:
   qdrant_data:
-  ollama_data:

@@ -23,8 +23,7 @@ class Settings:
     openrouter_api_key: str
     openrouter_model: str
     qdrant_url: str = "http://localhost:6333"
-    ollama_url: str = "http://localhost:11434"
-    embedding_model: str = "bge-m3"
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"
     debug: bool = False
     initial_import_limit: int = 100
     data_dir: Path = Path("data")
@@ -43,15 +42,14 @@ class Settings:
             problems.append("OPENROUTER_MODEL is required")
 
         qdrant_url = environ.get("QDRANT_URL", cls.qdrant_url).strip().rstrip("/")
-        ollama_url = environ.get("OLLAMA_URL", cls.ollama_url).strip().rstrip("/")
-        for name, value in (("QDRANT_URL", qdrant_url), ("OLLAMA_URL", ollama_url)):
+        for name, value in (("QDRANT_URL", qdrant_url),):
             parsed = urlsplit(value)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 problems.append(f"{name} must be an http(s) URL")
 
-        embedding_model = environ.get("OLLAMA_EMBEDDING_MODEL", cls.embedding_model).strip()
-        if not embedding_model:
-            problems.append("OLLAMA_EMBEDDING_MODEL must not be empty")
+        embedding_model = environ.get("EMAIL_AGENT_EMBEDDING_MODEL", cls.embedding_model).strip()
+        if embedding_model != cls.embedding_model:
+            problems.append("EMAIL_AGENT_EMBEDDING_MODEL must be Qwen/Qwen3-Embedding-0.6B")
 
         debug_value = environ.get("EMAIL_AGENT_DEBUG", "false").strip().lower()
         if debug_value not in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
@@ -100,7 +98,6 @@ class Settings:
             openrouter_api_key=api_key,
             openrouter_model=model,
             qdrant_url=qdrant_url,
-            ollama_url=ollama_url,
             embedding_model=embedding_model,
             debug=debug_value in {"1", "true", "yes", "on"},
             initial_import_limit=initial_import_limit,

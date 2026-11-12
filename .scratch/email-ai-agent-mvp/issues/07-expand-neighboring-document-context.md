@@ -19,3 +19,4 @@
 - [ ] The document store is a rebuildable derived representation; SQLite, original local source files, and persisted extracted text remain authoritative.
 - [ ] Before implementation, the installed-version persistence/reload behavior, relationship serialization, deterministic node-ID behavior, and `PrevNextNodePostprocessor` interface are verified and captured in implementation notes or tests.
 
+- [ ] Resolve nodes from the document store belonging to the active embedding-contract collection; never mix legacy and current generations.

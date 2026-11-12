@@ -24,7 +24,7 @@ The project is initially intended for a single personal Gmail account. The prior
 
 ## Solution
 
-Build a locally running, read-only Email AI Agent using Python, Pydantic AI, OpenRouter, Gmail MCP, LlamaIndex, Qdrant, Ollama embeddings, and SQLite.
+Build a locally running, read-only Email AI Agent using Python, Pydantic AI, OpenRouter, Gmail MCP, LlamaIndex, Qdrant, FastEmbed embeddings, and SQLite.
 
 The application has two principal components.
 
@@ -32,7 +32,7 @@ The application has two principal components.
 
 A deterministic ingestion pipeline downloads Gmail messages and their attachments, extracts supported textual content, stores the source data locally, and creates a persistent hybrid search index.
 
-LlamaIndex manages document processing, chunking, retrieval, and document-context expansion. Qdrant provides vector and sparse retrieval, using the locally hosted `bge-m3` embedding model through Ollama and BM25-based sparse search.
+LlamaIndex manages document processing, chunking, retrieval, and document-context expansion. Qdrant provides vector and sparse retrieval, using the locally hosted `Qwen/Qwen3-Embedding-0.6B` embedding model through FastEmbed and BM25-based sparse search.
 
 **2. Conversational email agent**
 
@@ -87,7 +87,7 @@ Subsequent runs reuse existing local data. New messages are imported through the
                                |
                          Qdrant + BM25
                                |
-                        Ollama embeddings
+                        FastEmbed Qwen3 embeddings
 
 
            Separate Ingestion Pipeline
@@ -129,11 +129,11 @@ The ingestion pipeline operates independently of LLM reasoning.
 
 6. As a user, I want the application to verify that the selected LLM supports tool calling, so that unsupported configurations fail clearly.
 
-7. As a user, I want the application to check whether Qdrant and Ollama are available, so that I can identify missing dependencies before starting indexing.
+7. As a user, I want the application to check whether Qdrant and local FastEmbed are available, so that I can identify missing dependencies before starting indexing.
 
-8. As a user, I want the application to offer to download the required embedding model if it is missing, so that initial setup requires fewer manual operations.
+8. As a user, I want the first explicit search or reindex to download the required embedding model into a persistent local cache when missing, so that initial setup requires fewer manual operations. Startup/status must not download model weights.
 
-9. As a user, I want Qdrant and Ollama to run through Docker Compose, so that local infrastructure is easy to start and stop.
+9. As a user, I want Qdrant to run through Docker Compose and FastEmbed locally in Python, so that local infrastructure is easy to start and stop.
 
 10. As a user, I want clear configuration errors instead of unexplained Python tracebacks, so that I can resolve setup problems quickly.
 
@@ -367,7 +367,7 @@ The agreed components are:
 
 | Component | Technology |
 |---|---|
-| Programming language | Python |
+| Programming language | Python 3.11–3.12 |
 | CLI application | Python CLI |
 | Agent framework | Pydantic AI |
 | Generative LLM | OpenRouter |
@@ -375,8 +375,8 @@ The agreed components are:
 | Gmail transport | MCP over stdio |
 | RAG framework | LlamaIndex |
 | Vector database | Qdrant through LlamaIndex `QdrantVectorStore` |
-| Embedding runtime | LlamaIndex `OllamaEmbedding` |
-| Embedding model | `bge-m3` |
+| Embedding runtime | LlamaIndex `FastEmbedEmbedding` |
+| Embedding model | `Qwen/Qwen3-Embedding-0.6B` |
 | Sparse retrieval | FastEmbed BM25 |
 | Retrieval fusion | LlamaIndex built-in relative-score fusion |
 | Relational metadata | SQLite |
@@ -472,7 +472,7 @@ Responsibilities:
 The external seam of the retrieval module should remain small: callers provide a query,
 filters, and a result limit and receive attributable evidence. Dense embedding, sparse
 encoding, fusion, vector-store access, and node-context expansion remain implementation
-details delegated to LlamaIndex, Qdrant, Ollama, and FastEmbed rather than separate custom
+details delegated to LlamaIndex, Qdrant, and FastEmbed rather than separate custom
 interfaces.
 
 **Synchronization module**
@@ -668,12 +668,12 @@ Original message content must remain preserved separately.
 
 The retrieval system combines:
 
-- Dense vector similarity using `bge-m3`.
+- Dense vector similarity using `Qwen/Qwen3-Embedding-0.6B`.
 - BM25-based sparse/lexical search.
 - LlamaIndex's built-in `relative_score_fusion` for combining results.
 
 Use LlamaIndex `QdrantVectorStore` with hybrid retrieval enabled. Dense vectors are produced
-by `OllamaEmbedding` using `bge-m3`; sparse vectors are produced by FastEmbed BM25. Use the
+by `FastEmbedEmbedding` using `Qwen/Qwen3-Embedding-0.6B`; sparse vectors are produced by FastEmbed BM25. Use the
 LlamaIndex `relative_score_fusion` path supplied by the installed integration. Do not
 implement tokenization, BM25 scoring, rank fusion, or vector search in application code.
 
@@ -911,11 +911,11 @@ The chosen model must support the agent's tool-calling requirements.
 
 The application should detect configuration or model compatibility failures early where possible.
 
-The embedding model is `bge-m3` through Ollama.
+The embedding model is `Qwen/Qwen3-Embedding-0.6B` through FastEmbed.
 
 Only one generative LLM is required: the OpenRouter model.
 
-Ollama is used for embeddings, not generation.
+FastEmbed is used for embeddings, not generation.
 
 Changing the embedding model requires reindexing.
 
@@ -963,7 +963,7 @@ Transient Gmail, Qdrant, and OpenRouter errors should use bounded retries with e
 
 Respect server-provided retry instructions when available.
 
-If Qdrant or Ollama is unavailable, Gmail MCP functionality may remain usable.
+If Qdrant or local FastEmbed is unavailable, Gmail MCP functionality may remain usable.
 
 If Gmail is unavailable, the agent may continue using locally indexed information while informing the user that live email access is unavailable.
 
@@ -977,7 +977,7 @@ Detailed exception output may be enabled through a debug mode.
 
 The CLI runs as a local Python process.
 
-Only Qdrant and Ollama need to run as Docker Compose services.
+Only Qdrant runs as a Docker Compose service. FastEmbed runs in the CLI process on CPU.
 
 Persistent storage must survive ordinary container restarts and shutdowns.
 
@@ -1018,7 +1018,7 @@ They should not require personal email data or production credentials for routin
 
 ### Primary Automated-Test Seam
 
-Use one primary high-level seam at the CLI/application boundary. Automated tests exercise realistic commands and user flows using synthetic Gmail messages and attachments, replace external services with controlled adapters, and verify terminal output together with persisted state. Real Gmail OAuth, Qdrant, Ollama, and OpenRouter are covered by the separate manual end-to-end acceptance scenario.
+Use one primary high-level seam at the CLI/application boundary. Automated tests exercise realistic commands and user flows using synthetic Gmail messages and attachments, replace external services with controlled adapters, and verify terminal output together with persisted state. Real Gmail OAuth, Qdrant, FastEmbed, and OpenRouter are covered by the separate manual end-to-end acceptance scenario.
 
 This seam is intentionally preferred over tests coupled to internal implementation structure. Narrower module tests are appropriate only where a failure cannot be exercised clearly or deterministically through the primary boundary.
 ### 2. Configuration Tests
@@ -1339,7 +1339,7 @@ Before implementing, Codex should verify the currently installed versions and pu
 - Pydantic AI's OpenRouter model support.
 - LlamaIndex's hybrid Qdrant integration.
 - Qdrant's dense and sparse configuration.
-- Ollama's `bge-m3` embedding support.
+- FastEmbed's `Qwen/Qwen3-Embedding-0.6B` embedding support.
 - LlamaIndex's document-store persistence and neighboring-node relationships.
 - FastEmbed BM25 behavior for Russian-language text, including the tokenizer actually used by
   the installed version.
@@ -1396,3 +1396,28 @@ The plan should prioritize simplicity, local persistence, minimal custom code, a
 
 Do not expand the MVP with additional services or advanced features unless they are technically necessary to satisfy the agreed requirements.
 
+### Dense embedding migration contract
+
+Use the exact FastEmbed identifier `Qwen/Qwen3-Embedding-0.6B` (FP32 ONNX export
+`Qdrant/Qwen3-Embedding-0.6B-onnx`, 1024 dimensions), via the official LlamaIndex
+`FastEmbedEmbedding` integration. Use Python 3.11–3.12 because integration 0.7.0 declares
+Python <3.13. CPUExecutionProvider is required; Windows needs the Visual C++ runtime.
+First explicit search/reindex downloads approximately 2.38 GB to the persistent data/models
+cache. Startup/status check registry/runtime capability without loading or downloading weights.
+
+Documents receive no prefix. Dense queries receive
+`Instruct: Given an email search query, retrieve relevant email passages\nQuery:` followed
+by the query. BM25 receives the original query. Keep FastEmbed BM25, QdrantVectorStore hybrid
+mode, VectorStoreIndex.as_retriever(), and built-in relative_score_fusion.
+
+Collection identity includes provider, model, ONNX artifact/precision, dimensions, normalization,
+query instruction and contract version. A change selects a fresh derived collection and matching
+document store, even when dimensions match. Legacy collections remain unused and preserved.
+One active collection is shared by email and future attachment nodes. SQLite fingerprints include
+this contract; never reuse incompatible vectors. Rebuild from archived local content without Gmail.
+Current --reindex rebuilds implemented email nodes only; unified attachment rebuilding remains
+Ticket 12 after Ticket 06. Preserve all source files and relationships throughout migration.
+
+Mocked embedding tests and local Qdrant tests are distinct from downloaded-model/server-Qdrant
+acceptance. Report the actual tested platforms and runtime versions; do not infer live retrieval
+success from mocks. See docs/qwen-fastembed-compatibility.md.

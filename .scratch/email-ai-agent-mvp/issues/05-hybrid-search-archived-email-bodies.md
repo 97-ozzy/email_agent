@@ -9,7 +9,7 @@
 - [] Normalize whitespace and conservatively remove obvious email noise, such as quoted replies and signatures, only when reliably identifiable. If a library cannot safely identify removable content, preserve it rather than risk losing useful information. Do not introduce LLM-based cleaning.
 - [] Cleaning applies only to the derived text used for RAG indexing; original archived email bodies remain unchanged. Add tests for HTML, plain text, Cyrillic, quoted replies, signatures, and source preservation.
 - [ ] Email bodies are represented as separate documents and split with SentenceSplitter at approximately 512 tokens with approximately 64 tokens of overlap, while short messages remain whole when appropriate.
-- [ ] Dense retrieval uses Ollama `bge-m3`, lexical retrieval uses BM25, and LlamaIndex's built-in `relative_score_fusion` combines their rankings.
+- [ ] Dense retrieval uses FastEmbed `Qwen/Qwen3-Embedding-0.6B`, lexical retrieval uses BM25, and LlamaIndex's built-in `relative_score_fusion` combines their rankings.
 - [ ] Qdrant and the document-processing state persist across application and container restarts.
 - [ ] `/search` returns matching text, relevance score, document ID, Gmail message ID, thread ID, source type, title, timestamp, and available location metadata.
 - [ ] Search supports sender, date or date range, and source-type filters.
@@ -19,7 +19,7 @@
 - [ ] Tests demonstrate exact-term and semantic matches, filters, result limits, context-budget enforcement, persistence, and no-result behavior using synthetic messages.
 - [ ] Each email body is a separate LlamaIndex `Document` with explicit stable source metadata and deterministic document/node identifiers; unchanged reprocessing upserts rather than duplicates it.
 - [ ] `SentenceSplitter` is configured with `chunk_size=512` and `chunk_overlap=64`.
-- [ ] Hybrid retrieval uses LlamaIndex `QdrantVectorStore` with hybrid mode enabled, `OllamaEmbedding` with `bge-m3` for dense vectors, FastEmbed BM25 for sparse vectors, and the integration's built-in `relative_score_fusion` rather than application-defined ranking or fusion.
+- [ ] Hybrid retrieval uses LlamaIndex `QdrantVectorStore` with hybrid mode enabled, `FastEmbedEmbedding` with `Qwen/Qwen3-Embedding-0.6B` for dense vectors, FastEmbed BM25 for sparse vectors, and the integration's built-in `relative_score_fusion` rather than application-defined ranking or fusion.
 - [ ] A LlamaIndex `VectorStoreIndex` and `as_retriever()` return evidence directly, without a query engine, response synthesizer, OpenRouter call, or other generative-model call.
 - [ ] Email nodes use the one shared Qdrant collection reserved for both email and attachment nodes, with source metadata distinguishing their types.
 - [ ] SQLite and locally archived source text remain authoritative; Qdrant is treated as a rebuildable derived index.
@@ -33,7 +33,7 @@ contract mismatch was confirmed so the project would not retain a partial retrie
 
 - `llama-index-core==0.14.25`
 - `llama-index-vector-stores-qdrant==0.10.4`
-- `llama-index-embeddings-ollama==0.10.0`
+- `llama-index-embeddings-fastembed==0.7.0` (current migration; original adapter replaced)
 - `qdrant-client==1.20.0`
 - `fastembed==0.9.1`
 
@@ -58,9 +58,8 @@ the same node producing one Qdrant point. The compatibility gate is complete.
 
 Implementation: `/search` lazily processes archived email bodies with stable UUID5 node IDs,
 512/64 splitting, persisted SimpleDocumentStore and SQLite fingerprints, and the shared
-`email_agent_sources` Qdrant collection. Changed sources replace old chunks. The default
+`email_agent_sources_<contract-hash>` Qdrant collection. Changed sources replace old chunks. The default
 text budget is 6000 tokens; metadata is retained separately. Synthetic automated coverage
 includes cleaning, source preservation, exact and semantic matches, filters, limits, budgets,
 idempotency, changed-source replacement, restart persistence, and empty results.
-Live Ollama/server-Qdrant acceptance remains a manual environment check.
-
+Downloaded FP32 Qwen3/server-Qdrant synthetic acceptance passed on Windows CPU; see docs/qwen-fastembed-compatibility.md.

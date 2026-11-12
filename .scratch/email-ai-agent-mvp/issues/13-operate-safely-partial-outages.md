@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Transient Gmail, Qdrant, Ollama, and OpenRouter failures use bounded exponential backoff and honor server retry guidance when available.
-- [ ] When Qdrant or Ollama is unavailable, live Gmail questions can still work and the unavailable local capability is disclosed.
+- [ ] Transient Gmail, Qdrant, FastEmbed, and OpenRouter failures use bounded exponential backoff and honor server retry guidance when available.
+- [ ] When Qdrant or local FastEmbed is unavailable, live Gmail questions can still work and the unavailable local capability is disclosed.
 - [ ] When Gmail is unavailable, archived search and local-agent questions can still work and the unavailable live coverage is disclosed.
 - [ ] A partially successful import permits entry to the CLI with a clear incomplete-index warning when usable data exists.
 - [ ] Configuration and authentication failures produce actionable messages, while an explicit debug mode can expose technical exception details.
@@ -15,4 +15,3 @@
 - [ ] Normal logs include operation names, durations, counts, and safe error summaries but not complete bodies, attachment contents, access tokens, or private model reasoning.
 - [ ] Only evidence needed for an active answer and bounded conversation context is sent to OpenRouter; the full archive is never sent by default.
 - [ ] Tests simulate each service outage, transient retry, partial import, and representative sensitive value to verify degraded behavior and log redaction.
-

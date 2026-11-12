@@ -15,3 +15,4 @@
 - [ ] The CLI reports discovered, downloaded, parsed, indexed, skipped, unsupported, and failed outcomes accurately.
 - [ ] Tests cover new received mail, new sent mail, pagination, overlapping known records, new attachments, no-change repeats, and preservation of locally archived records.
 
+- [ ] Index using the active FastEmbed Qwen3 contract; changing models must rebuild local vectors rather than skip records because Gmail IDs already exist.

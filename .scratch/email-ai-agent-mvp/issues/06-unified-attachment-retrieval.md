@@ -20,3 +20,4 @@
 - [ ] Filename and source-type filtering uses the installed Qdrant/LlamaIndex metadata-filter functionality rather than a custom vector-search path.
 - [ ] Qdrant points are rebuildable derivatives of SQLite, original local files, and persisted extracted text.
 
+- [ ] Attachment nodes use the same active embedding-contract collection as email nodes and the exact FP32 Qwen3 model; migrations rebuild from persisted extracted text without Gmail downloads.
