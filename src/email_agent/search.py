@@ -62,6 +62,33 @@ class SearchResult:
     start_char: int | None = None
     end_char: int | None = None
     page_number: int | None = None
+    chunk_id: str | None = None
+    chunk_index: int | None = None
+
+
+@dataclass(frozen=True)
+class DocumentChunk:
+    """One local chunk and its source attribution."""
+
+    document_id: str
+    chunk_id: str
+    chunk_index: int
+    text: str
+    metadata: dict[str, object]
+    sources: tuple[AttachmentReference, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class DocumentContextError:
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class DocumentContext:
+    chunks: tuple[DocumentChunk, ...] = ()
+    error: DocumentContextError | None = None
 
 
 class SearchBackend(Protocol):

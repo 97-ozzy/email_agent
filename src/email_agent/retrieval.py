@@ -16,7 +16,8 @@ import tiktoken
 from llama_index.core import Document, QueryBundle, StorageContext, VectorStoreIndex
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import BaseNode, TextNode
+from llama_index.core.postprocessor import PrevNextNodePostprocessor
+from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -24,7 +25,14 @@ from qdrant_client import QdrantClient, models
 
 from email_agent.archive import SQLiteArchive
 from email_agent.config import Settings
-from email_agent.search import SearchRequest, SearchResult, clean_email_body
+from email_agent.search import (
+    DocumentChunk,
+    DocumentContext,
+    DocumentContextError,
+    SearchRequest,
+    SearchResult,
+    clean_email_body,
+)
 
 QUERY_INSTRUCTION = (
     "Instruct: Given an email search query, retrieve relevant email passages\nQuery:"
@@ -115,7 +123,7 @@ class HybridSearchIndex:
                         metadata,
                         self.splitter.chunk_size,
                         self.splitter.chunk_overlap,
-                        "unified-v1",
+                        "unified-v2-chunk-positions",
                         self.embedding_contract,
                     ],
                     ensure_ascii=False,
@@ -129,6 +137,10 @@ class HybridSearchIndex:
                 self._set_indexing_status(db, document_id, "pending")
             try:
                 nodes = self.splitter.get_nodes_from_documents([document]) if text else []
+                for position, node in enumerate(nodes):
+                    node.metadata["chunk_index"] = position
+                    node.excluded_embed_metadata_keys.append("chunk_index")
+                    node.excluded_llm_metadata_keys.append("chunk_index")
                 if collection_exists:
                     self.store.delete(document_id)
                 self.docstore.delete_ref_doc(document_id, raise_error=False)
@@ -353,6 +365,105 @@ class HybridSearchIndex:
                     sources=sources,
                     start_char=start_char,
                     end_char=(start_char + len(text)) if start_char is not None else None,
+                    chunk_id=hit.node.node_id,
+                    chunk_index=int(metadata["chunk_index"]),
                 )
             )
         return results
+
+    def get_local_document(
+        self,
+        document_id: str,
+        *,
+        chunk_id: str | None = None,
+        chunk_index: int | None = None,
+        num_nodes: int = 1,
+    ) -> DocumentContext:
+        """Read bounded context from the active local store without retrieval or inference."""
+
+        def error(code: str, message: str) -> DocumentContext:
+            return DocumentContext(error=DocumentContextError(code, message))
+
+        if (
+            type(num_nodes) is not int
+            or not 0 <= num_nodes <= 2
+            or (chunk_id is None) == (chunk_index is None)
+            or (chunk_index is not None and (type(chunk_index) is not int or chunk_index < 0))
+        ):
+            return error(
+                "invalid_request", "Supply one chunk ID or nonnegative position; num_nodes is 0–2."
+            )
+        info = self.docstore.get_ref_doc_info(document_id)
+        if info is None:
+            return error("unknown_document", "Document is not in the active local document store.")
+        if chunk_id is None:
+            if chunk_index is None or chunk_index >= len(info.node_ids):
+                return error("unknown_chunk", "Chunk position is outside the requested document.")
+            chunk_id = info.node_ids[chunk_index]
+        if chunk_id not in info.node_ids:
+            return error("unknown_chunk", "Chunk does not belong to the requested document.")
+        target = self.docstore.get_node(chunk_id, raise_error=False)
+        if target is None or target.ref_doc_id != document_id:
+            return error("unknown_chunk", "Chunk is missing from the requested document.")
+        try:
+            hits = PrevNextNodePostprocessor(
+                docstore=self.docstore, num_nodes=num_nodes, mode="both"
+            ).postprocess_nodes([NodeWithScore(node=target)])
+        except ValueError:
+            return error(
+                "incomplete_document", "Document links are incomplete; rebuild the local index."
+            )
+        nodes = [hit.node for hit in hits]
+        if any(n.ref_doc_id != document_id or n.node_id not in info.node_ids for n in nodes):
+            return error(
+                "incomplete_document", "Document links cross source boundaries; rebuild the index."
+            )
+        if any(type(n.metadata.get("chunk_index")) is not int for n in nodes):
+            return error(
+                "incomplete_document", "Chunk positions are missing; rebuild the local index."
+            )
+        tokenizer = tiktoken.get_encoding("cl100k_base")
+        remaining = self.settings.document_context_tokens
+        if remaining < 1:
+            return error("invalid_request", "The document context token budget must be positive.")
+        sources = (
+            self.archive.attachment_sources(document_id)
+            if target.metadata["source_type"] == "attachment"
+            else ()
+        )
+        if target.metadata["source_type"] == "attachment" and not sources:
+            return error("unknown_document", "Attachment has no archived source references.")
+        chosen: list[DocumentChunk] = []
+        # Keep the target first, then the nearest complete neighbors that fit.
+        position = int(target.metadata["chunk_index"])
+        for node in sorted(
+            nodes,
+            key=lambda n: (
+                abs(int(n.metadata["chunk_index"]) - position),
+                int(n.metadata["chunk_index"]),
+            ),
+        ):
+            text = node.get_content()
+            tokens = tokenizer.encode(text, disallowed_special=())
+            truncated = False
+            if len(tokens) > remaining:
+                if node.node_id != target.node_id:
+                    continue
+                text = tokenizer.decode_bytes(tokens[:remaining]).decode("utf-8", errors="ignore")
+                truncated = True
+            remaining -= min(len(tokens), remaining)
+            metadata = dict(node.metadata)
+            if sources:
+                metadata["sources"] = [asdict(source) for source in sources]
+            chosen.append(
+                DocumentChunk(
+                    document_id,
+                    node.node_id,
+                    int(node.metadata["chunk_index"]),
+                    text,
+                    metadata,
+                    sources,
+                    truncated,
+                )
+            )
+        return DocumentContext(chunks=tuple(sorted(chosen, key=lambda c: c.chunk_index)))

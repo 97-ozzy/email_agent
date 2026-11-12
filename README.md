@@ -154,3 +154,22 @@ Even equal-dimension model changes rebuild vectors from local bodies. Run
 Attachments and their extracted text remain preserved; indexing/rebuilding them is still
 assigned to Tickets 06/12. No unrelated future ticket is implemented here.
 See [compatibility evidence](docs/qwen-fastembed-compatibility.md) for real versus mocked checks.
+
+### Neighboring document context
+
+Search results expose `chunk_id` and zero-based `chunk_index`. Call
+`HybridSearchIndex.get_local_document(document_id, chunk_id=..., num_nodes=1)`
+or pass `chunk_index=...` instead of `chunk_id`. `num_nodes` accepts 0–2 per
+direction, defaulting to one previous and one next chunk. Results contain ordered
+chunks, source metadata, and authoritative attachment references. Unknown IDs,
+invalid requests, or incomplete derived nodes return a structured `error` with
+`code` and `message` and no chunks.
+
+`EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS` limits returned passage text to 3000 tokens
+by default. The target takes priority; only complete neighbors that fit are
+included. A target exceeding the whole budget is truncated and marked
+`truncated=True`. Citation metadata remains complete. Search does not automatically
+expand results. Expansion reads the active collection's local document store,
+without vector queries, embedding generation, or generative model calls.
+Document stores are derived data: rebuild from SQLite and preserved source text
+using `--reindex` if needed. See [compatibility notes](docs/document-context.md).

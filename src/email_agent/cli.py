@@ -281,6 +281,8 @@ def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
         )
         if result.location:
             stdout.write(f"location: {result.location}\n")
+        if result.chunk_id is not None:
+            stdout.write(f"chunk_id: {result.chunk_id}\nchunk_index: {result.chunk_index}\n")
         if result.filename is not None:
             stdout.write(
                 f"attachment_id: {result.attachment_id}\n"

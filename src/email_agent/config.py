@@ -30,6 +30,7 @@ class Settings:
     attachment_max_bytes: int = 20 * 1024 * 1024
     search_context_chars: int = 1_000_000
     search_context_tokens: int = 6000
+    document_context_tokens: int = 3000
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Settings:
@@ -91,6 +92,15 @@ class Settings:
         except ValueError:
             context_tokens = 0
             problems.append("EMAIL_AGENT_SEARCH_CONTEXT_TOKENS must be positive")
+        try:
+            document_context_tokens = int(
+                environ.get("EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS", "3000")
+            )
+            if document_context_tokens < 1:
+                raise ValueError
+        except ValueError:
+            document_context_tokens = 0
+            problems.append("EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS must be positive")
         if problems:
             raise ConfigurationError(problems)
 
@@ -105,4 +115,5 @@ class Settings:
             attachment_max_bytes=attachment_max_bytes,
             search_context_chars=context_chars,
             search_context_tokens=context_tokens,
+            document_context_tokens=document_context_tokens,
         )
