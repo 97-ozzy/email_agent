@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from email_agent.archive import ArchiveState, SQLiteArchive
 from email_agent.attachments import AttachmentReport, process_pending_attachments
+from email_agent.chat import ChatError, ChatSession, LocalArchive, openrouter_model
 from email_agent.config import ConfigurationError, Settings
 from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
 from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
@@ -25,6 +26,7 @@ load_dotenv()
 
 HELP_TEXT = """Supported commands:
   /help    Display supported commands
+  /clear   Clear in-memory conversation history
   /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
   /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
                 [--source email|attachment] [--filename NAME] [--type pdf|docx|text|email]
@@ -46,6 +48,8 @@ def run_application(
     services_factory: Callable[[Settings], ServiceAdapter] | None = None,
     gmail_factory: Callable[[], GmailAdapter] | None = None,
     search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
+    chat_factory: Callable[[Settings, LocalArchive, Callable[[str], None]], ChatSession]
+    | None = None,
 ) -> int:
     """Validate configuration and run the interactive application."""
     try:
@@ -67,6 +71,7 @@ def run_application(
             stdin,
             stdout,
             search_factory=search_factory,
+            chat_factory=chat_factory,
         )
     except Exception as exc:
         if settings.debug:
@@ -84,6 +89,8 @@ def run_cli(
     stdout: TextIO,
     *,
     search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
+    chat_factory: Callable[[Settings, LocalArchive, Callable[[str], None]], ChatSession]
+    | None = None,
 ) -> int:
     """Run the terminal conversation using an injected service boundary."""
     stdout.write("Email Agent\n")
@@ -122,7 +129,20 @@ def run_cli(
             _write_import_report(stdout, report)
 
     search_backend: SearchBackend | None = None
-    stdout.write("Type /help for commands.\n")
+    chat: ChatSession | None = None
+
+    def get_search_backend() -> SearchBackend:
+        nonlocal search_backend
+        if search_backend is None:
+            if search_factory is None:
+                from email_agent.retrieval import HybridSearchIndex
+
+                search_backend = HybridSearchIndex(settings, archive)
+            else:
+                search_backend = search_factory(settings, archive)
+        return search_backend
+
+    stdout.write("Ask a question about your local archive. Type /help for commands.\n")
     while True:
         stdout.write("email-agent> ")
         stdout.flush()
@@ -139,6 +159,10 @@ def run_cli(
             return 0
         if command == "/help":
             stdout.write(HELP_TEXT)
+        elif command == "/clear":
+            if chat is not None:
+                chat.clear()
+            stdout.write("Conversation history cleared.\n")
         elif command == "/status":
             status, local_problem = _checked_service_status(services, settings.embedding_model)
             _write_status(
@@ -152,7 +176,9 @@ def run_cli(
             try:
                 from email_agent.retrieval import HybridSearchIndex
 
-                backend = HybridSearchIndex(settings, archive)
+                backend = get_search_backend()
+                if not isinstance(backend, HybridSearchIndex):
+                    raise RuntimeError("The configured search backend cannot rebuild the index.")
                 count = backend.refresh(force=True)
                 search_backend = backend
                 stdout.write(f"Reindexed {count} archived documents from local content.\n")
@@ -161,15 +187,9 @@ def run_cli(
         elif command.startswith("/search"):
             try:
                 request = _parse_search_request(command)
-                if search_backend is None:
-                    if search_factory is None:
-                        from email_agent.retrieval import HybridSearchIndex
-
-                        search_backend = HybridSearchIndex(settings, archive)
-                    else:
-                        search_backend = search_factory(settings, archive)
-                search_backend.refresh()
-                _write_search_results(stdout, search_backend.search(request))
+                backend = get_search_backend()
+                backend.refresh()
+                _write_search_results(stdout, backend.search(request))
             except ValueError as exc:
                 stdout.write(f"Search error: {exc}\n")
             except Exception as exc:
@@ -198,9 +218,36 @@ def run_cli(
         elif command.startswith("/"):
             stdout.write(f"Unknown command: {command}. Type /help for supported commands.\n")
         else:
-            stdout.write(
-                "Chat is not configured in this bootstrap ticket. Type /help for commands.\n"
-            )
+            try:
+                if chat is None:
+
+                    def notify(name: str) -> None:
+                        stdout.write(f"Tool: {name}\n")
+                        stdout.flush()
+
+                    model = openrouter_model(settings) if chat_factory is None else None
+                    backend = get_search_backend()
+                    if not isinstance(backend, LocalArchive):
+                        raise ChatError(
+                            "The search backend does not support local document context."
+                        )
+                    if chat_factory is not None:
+                        chat = chat_factory(settings, backend, notify)
+                    else:
+                        chat = ChatSession(
+                            settings,
+                            backend,
+                            model=model,
+                            notify=notify,
+                        )
+                stdout.write(chat.ask(command) + "\n")
+            except ChatError as exc:
+                stdout.write(f"{exc}\n")
+            except Exception:
+                stdout.write(
+                    "Chat unavailable. Check OpenRouter credentials, model tool support, "
+                    "and local retrieval services, then retry.\n"
+                )
 
 
 def _parse_search_request(command: str) -> SearchRequest:

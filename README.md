@@ -1,8 +1,8 @@
 # Email Agent
 
 Email Agent is a local, read-only email AI agent. It provides a configurable CLI, local
-Qdrant/FastEmbed diagnostics, and live read-only Gmail search and retrieval. Gmail ingestion and
-chat arrive in later tickets.
+Qdrant/FastEmbed diagnostics, live read-only Gmail access, local archive ingestion, and
+conversational search over archived emails and attachments.
 
 ## Requirements
 
@@ -78,6 +78,7 @@ FastEmbed downloads the exact FP32 Qwen3 ONNX model (~2.38 GB) on first search/r
 Interactive commands currently available:
 
 - `/help` — list supported commands
+- `/clear` - reset in-memory conversation history without changing the archive or index
 - `/status` - refresh Gmail, Qdrant, FastEmbed, and embedding-model diagnostics
 - `/gmail-search QUERY` - search live Gmail using Gmail search syntax
 - `/gmail-message ID` - retrieve one complete live Gmail message
@@ -87,6 +88,33 @@ Interactive commands currently available:
 The application exposes no Gmail send, draft, delete, archive, or label-modification command.
 If an existing `gmail-agent` login has a broader access level, startup replaces it with a new
 read-only authorization before Gmail becomes available.
+
+### Chat with the local archive
+
+Type a natural-language question at the prompt. Pydantic AI uses `OPENROUTER_MODEL` through
+OpenRouter and can repeatedly call `search_email_rag` and `get_local_document` to investigate.
+The first question checks credentials and the model's advertised tool support before initializing
+retrieval. Provider routing requires support for the requested parameters. Errors leave the
+terminal commands available.
+
+Answers are instructed to cite messages as `[message:ID]`, with attachment IDs, filenames,
+and chunk IDs for attachment claims; identify conflicting evidence; and disclose missing evidence.
+Local search covers only the archived subset. Chat does not search live Gmail yet.
+Email and attachment contents are treated as untrusted source data, including embedded instructions.
+Retrieval scores are relevance rankings, not probabilities that a claim is true.
+
+`EMAIL_AGENT_TOOL_CALL_LIMIT` defaults to 10 actual retrieval calls per question. When exhausted,
+the agent receives no further retrieval tools and the CLI adds a partial-answer notice.
+If final synthesis fails after that limit, cited source excerpts remain available as a fallback.
+A separate bounded model-request budget prevents repeated invalid tool requests from looping.
+Tool notifications print only tool names, without arguments, correspondence, or private reasoning.
+The last ten complete exchanges, including paired tool calls and replies, stay in memory until
+`/clear` or exit; conversation history is never written to disk.
+
+OpenRouter receives the question, retained conversation, and selected retrieved email/attachment
+passages. Source files and the vector index remain local. Controlled-model tests exercise the
+real local archive/index with mocked embeddings and local Qdrant; they verify orchestration and
+policy delivery, and do not establish live-model answer quality or universal injection resistance.
 
 ## Troubleshooting
 
@@ -159,7 +187,7 @@ See [compatibility evidence](docs/qwen-fastembed-compatibility.md) for real vers
 
 Search results expose `chunk_id` and zero-based `chunk_index`. Call
 `HybridSearchIndex.get_local_document(document_id, chunk_id=..., num_nodes=1)`
-or pass `chunk_index=...` instead of `chunk_id`. `num_nodes` accepts 0�2 per
+or pass `chunk_index=...` instead of `chunk_id`. `num_nodes` accepts 0–2 per
 direction, defaulting to one previous and one next chunk. Results contain ordered
 chunks, source metadata, and authoritative attachment references. Unknown IDs,
 invalid requests, or incomplete derived nodes return a structured `error` with

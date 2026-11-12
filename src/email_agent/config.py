@@ -31,6 +31,7 @@ class Settings:
     search_context_chars: int = 1_000_000
     search_context_tokens: int = 6000
     document_context_tokens: int = 3000
+    tool_call_limit: int = 10
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Settings:
@@ -101,6 +102,13 @@ class Settings:
         except ValueError:
             document_context_tokens = 0
             problems.append("EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS must be positive")
+        try:
+            tool_call_limit = int(environ.get("EMAIL_AGENT_TOOL_CALL_LIMIT", "10"))
+            if tool_call_limit < 1:
+                raise ValueError
+        except ValueError:
+            tool_call_limit = 0
+            problems.append("EMAIL_AGENT_TOOL_CALL_LIMIT must be a positive integer")
         if problems:
             raise ConfigurationError(problems)
 
@@ -116,4 +124,5 @@ class Settings:
             search_context_chars=context_chars,
             search_context_tokens=context_tokens,
             document_context_tokens=document_context_tokens,
+            tool_call_limit=tool_call_limit,
         )
