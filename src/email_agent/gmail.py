@@ -124,7 +124,10 @@ class GmailAgentAdapter:
         return self._discovery_runner(query, max_results, page_token)
 
     def get_message(self, message_id: str) -> object:
-        return self._read_json("message", message_id)
+        return self._run_json_command(
+            ["gmail-agent", "message", message_id, "--json", "--max-chars", "0"],
+            "message",
+        )
 
     def get_thread(self, thread_id: str) -> object:
         return self._read_json("thread", thread_id)
@@ -155,7 +158,9 @@ def _run_command(command: list[str], capture_output: bool) -> CompletedProcess[s
             command,
             check=False,
             capture_output=capture_output,
+            encoding="utf-8",
             env=environment,
+            errors="strict",
             text=True,
         )
     except FileNotFoundError:

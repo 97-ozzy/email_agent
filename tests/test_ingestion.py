@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -73,12 +74,12 @@ class PagedGmail(SyntheticGmail):
 
 
 class PartiallyFailingGmail(SyntheticGmail):
-    def __init__(self, messages: list[dict[str, object]], failed_id: str) -> None:
+    def __init__(self, messages: list[dict[str, object]], failed_id: str | None) -> None:
         super().__init__(messages)
         self.failed_id = failed_id
 
     def get_message(self, message_id: str) -> object:
-        if message_id == self.failed_id:
+        if self.failed_id is not None and message_id == self.failed_id:
             raise RuntimeError("temporary Gmail failure")
         return super().get_message(message_id)
 
@@ -252,6 +253,45 @@ class InitialImportTests(TestCase):
             )
             self.assertEqual(thread["gmail_thread_id"], "thread-1")
 
+    def test_russian_subject_snippet_and_complete_body_are_saved_as_utf8(self) -> None:
+        russian = message(
+            "message-ru",
+            body="Здравствуйте, Анна!\n\nВаш платёж успешно обработан.\nС уважением, Банк",
+        )
+        russian["subject"] = "Счёт за ноябрь"
+        russian["snippet"] = "Оплата получена — спасибо"
+        gmail = SyntheticGmail([russian])
+
+        with TemporaryDirectory() as directory:
+            run_application(
+                environ={
+                    "OPENROUTER_API_KEY": "test-key",
+                    "OPENROUTER_MODEL": "test/model",
+                    "EMAIL_AGENT_DATA_DIR": directory,
+                    "EMAIL_AGENT_INITIAL_IMPORT_LIMIT": "1",
+                },
+                stdin=StringIO("/exit\n"),
+                stdout=StringIO(),
+                stderr=StringIO(),
+                services_factory=lambda settings: AvailableServices(),
+                gmail_factory=lambda: gmail,
+            )
+
+            with closing(sqlite3.connect(Path(directory) / "archive.sqlite3")) as database:
+                stored = database.execute(
+                    "SELECT subject, snippet, body_path FROM messages WHERE gmail_message_id = ?",
+                    ("message-ru",),
+                ).fetchone()
+            assert stored is not None
+            stored_body = (Path(directory) / stored[2]).read_text(encoding="utf-8")
+
+        self.assertEqual(stored[0], "Счёт за ноябрь")
+        self.assertEqual(stored[1], "Оплата получена — спасибо")
+        self.assertEqual(
+            stored_body,
+            "Здравствуйте, Анна!\n\nВаш платёж успешно обработан.\nС уважением, Банк",
+        )
+
     def test_partial_failure_preserves_completed_messages_and_warns(self) -> None:
         gmail = PartiallyFailingGmail(
             [
@@ -294,6 +334,69 @@ class InitialImportTests(TestCase):
         self.assertEqual(
             statuses,
             {"message-good": "downloaded", "message-failed": "failed"},
+        )
+
+    def test_restart_retries_only_failed_messages_without_duplicates(self) -> None:
+        gmail = PartiallyFailingGmail(
+            [
+                message("message-good", body="already complete"),
+                message("message-retry", body="полный текст после повтора"),
+            ],
+            failed_id="message-retry",
+        )
+
+        with TemporaryDirectory() as directory:
+            environment = {
+                "OPENROUTER_API_KEY": "test-key",
+                "OPENROUTER_MODEL": "test/model",
+                "EMAIL_AGENT_DATA_DIR": directory,
+                "EMAIL_AGENT_INITIAL_IMPORT_LIMIT": "2",
+            }
+            run_application(
+                environ=environment,
+                stdin=StringIO("/exit\n"),
+                stdout=StringIO(),
+                stderr=StringIO(),
+                services_factory=lambda settings: AvailableServices(),
+                gmail_factory=lambda: gmail,
+            )
+            gmail.failed_id = None
+            restart_output = StringIO()
+            run_application(
+                environ=environment,
+                stdin=StringIO("/exit\n"),
+                stdout=restart_output,
+                stderr=StringIO(),
+                services_factory=lambda settings: AvailableServices(),
+                gmail_factory=lambda: gmail,
+            )
+
+            database = sqlite3.connect(Path(directory) / "archive.sqlite3")
+            rows = database.execute(
+                "SELECT gmail_message_id, ingestion_status, body_path FROM messages "
+                "ORDER BY gmail_message_id"
+            ).fetchall()
+            failed_count = database.execute(
+                "SELECT COUNT(*) FROM ingestion_failures"
+            ).fetchone()[0]
+            database.close()
+            retried_body_path = next(row[2] for row in rows if row[0] == "message-retry")
+            retried_body = (Path(directory) / retried_body_path).read_text(encoding="utf-8")
+
+        self.assertEqual(gmail.downloaded_ids, ["message-good", "message-retry"])
+        self.assertEqual(
+            gmail.discovery_calls,
+            [("in:inbox OR in:sent", 2, None)],
+        )
+        self.assertEqual(
+            [(row[0], row[1]) for row in rows],
+            [("message-good", "downloaded"), ("message-retry", "downloaded")],
+        )
+        self.assertEqual(failed_count, 0)
+        self.assertEqual(retried_body, "полный текст после повтора")
+        self.assertIn(
+            "Retry import: requested 1, downloaded 1, processed 1, failed 0",
+            restart_output.getvalue(),
         )
 
     def test_restart_reuses_completed_messages_without_redownloading(self) -> None:

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from email_agent.archive import ArchiveState, SQLiteArchive
 from email_agent.config import ConfigurationError, Settings
 from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
-from email_agent.ingestion import ImportReport, import_recent_messages
+from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
 
 load_dotenv()
@@ -80,7 +80,10 @@ def run_cli(
     if gmail_status.available:
         archive = SQLiteArchive(settings.data_dir)
         archive_state = archive.state()
-        if archive_state.exists:
+        if archive_state.failed:
+            report = retry_failed_messages(gmail, archive)
+            _write_import_report(stdout, report, action="Retry import")
+        elif archive_state.exists:
             _write_archive_reuse(stdout, archive_state)
         else:
             report = import_recent_messages(
@@ -149,9 +152,14 @@ def run_cli(
             )
 
 
-def _write_import_report(stdout: TextIO, report: ImportReport) -> None:
+def _write_import_report(
+    stdout: TextIO,
+    report: ImportReport,
+    *,
+    action: str = "Initial import",
+) -> None:
     stdout.write(
-        "Initial import: "
+        f"{action}: "
         f"requested {report.requested}, downloaded {report.downloaded}, "
         f"processed {report.processed}, failed {report.failed}"
     )

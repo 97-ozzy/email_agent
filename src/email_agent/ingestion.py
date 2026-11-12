@@ -57,6 +57,30 @@ def import_recent_messages(
     return ImportReport(limit, downloaded, processed, failed, reused)
 
 
+def retry_failed_messages(gmail: GmailAdapter, archive: SQLiteArchive) -> ImportReport:
+    """Retry failed IDs without discovering or redownloading completed messages."""
+    failed_ids = archive.failed_message_ids()
+    downloaded = 0
+    processed = 0
+    failed = 0
+
+    for message_id in failed_ids:
+        summary: dict[str, object] = {"id": message_id}
+        try:
+            detail = gmail.get_message(message_id)
+            if not isinstance(detail, dict):
+                raise ValueError(f"Gmail returned an invalid message for {message_id}")
+            downloaded += 1
+            archive.store_message({**cast(dict[str, object], detail), "id": message_id})
+            processed += 1
+        except Exception as exc:
+            failed += 1
+            with suppress(Exception):
+                archive.record_failure(summary, str(exc) or type(exc).__name__)
+
+    return ImportReport(len(failed_ids), downloaded, processed, failed, reused=0)
+
+
 def _discover_recent_messages(
     gmail: GmailAdapter, limit: int
 ) -> tuple[list[dict[str, object]], int]:

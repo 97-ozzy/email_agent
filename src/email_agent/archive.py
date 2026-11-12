@@ -32,6 +32,7 @@ class _MessageMetadata:
     sender: str
     recipients: str
     subject: str
+    snippet: str
     timestamp: str
     labels: str
     source_reference: str
@@ -52,6 +53,7 @@ class _MessageMetadata:
             sender=_optional_text(message.get("from")),
             recipients=json.dumps(recipients, ensure_ascii=False),
             subject=_optional_text(message.get("subject")),
+            snippet=_optional_text(message.get("snippet")),
             timestamp=_optional_text(message.get("date")),
             labels=json.dumps(labels, ensure_ascii=False),
             source_reference=f"https://mail.google.com/mail/u/0/#all/{message_id}",
@@ -88,6 +90,15 @@ class SQLiteArchive:
                 "SELECT gmail_message_id FROM messages WHERE ingestion_status = 'downloaded'"
             )
             return {str(row[0]) for row in rows}
+
+    def failed_message_ids(self) -> list[str]:
+        """Return only message IDs that need another download attempt."""
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                "SELECT gmail_message_id FROM ingestion_failures "
+                "ORDER BY updated_at, gmail_message_id"
+            )
+            return [str(row[0]) for row in rows]
 
     def state(self) -> ArchiveState:
         """Summarize durable import state without contacting Gmail."""
@@ -195,15 +206,16 @@ class SQLiteArchive:
         database.execute(
             """
             INSERT INTO messages (
-                gmail_message_id, gmail_thread_id, sender, recipients, subject,
+                gmail_message_id, gmail_thread_id, sender, recipients, subject, snippet,
                 message_timestamp, labels, source_reference, body_path, body_format,
                 ingestion_status, indexing_status, failure_reason, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
             ON CONFLICT(gmail_message_id) DO UPDATE SET
                 gmail_thread_id = excluded.gmail_thread_id,
                 sender = excluded.sender,
                 recipients = excluded.recipients,
                 subject = excluded.subject,
+                snippet = excluded.snippet,
                 message_timestamp = excluded.message_timestamp,
                 labels = excluded.labels,
                 source_reference = excluded.source_reference,
@@ -219,6 +231,7 @@ class SQLiteArchive:
                 metadata.sender,
                 metadata.recipients,
                 metadata.subject,
+                metadata.snippet,
                 metadata.timestamp,
                 metadata.labels,
                 metadata.source_reference,
@@ -245,6 +258,7 @@ class SQLiteArchive:
                     sender TEXT NOT NULL,
                     recipients TEXT NOT NULL,
                     subject TEXT NOT NULL,
+                    snippet TEXT NOT NULL DEFAULT '',
                     message_timestamp TEXT NOT NULL,
                     labels TEXT NOT NULL,
                     source_reference TEXT NOT NULL,
@@ -271,6 +285,13 @@ class SQLiteArchive:
                 );
                 """
             )
+            columns = {
+                str(row[1]) for row in database.execute("PRAGMA table_info(messages)")
+            }
+            if "snippet" not in columns:
+                database.execute(
+                    "ALTER TABLE messages ADD COLUMN snippet TEXT NOT NULL DEFAULT ''"
+                )
 
     def _connect(self) -> sqlite3.Connection:
         database = sqlite3.connect(self.database_path)

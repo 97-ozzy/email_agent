@@ -181,6 +181,32 @@ class GmailAgentReadOperationsTests(TestCase):
 
         self.assertEqual(result, {"messages": [{"subject": "Ozon\u200c"}]})
 
+    def test_message_subprocess_decodes_russian_json_as_strict_utf8(self) -> None:
+        russian_message = {
+            "id": "message-ru",
+            "subject": "Счёт за ноябрь",
+            "snippet": "Оплата получена",
+            "body": "Здравствуйте! Ваш платёж успешно обработан.",
+        }
+
+        def windows_decoding_process(
+            command: list[str],
+            **kwargs: object,
+        ) -> CompletedProcess[str]:
+            if kwargs.get("encoding") != "utf-8" or kwargs.get("errors") != "strict":
+                raise UnicodeDecodeError("charmap", b"\x98", 0, 1, "cannot decode byte 0x98")
+            return CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(russian_message, ensure_ascii=False),
+                stderr="",
+            )
+
+        with patch("email_agent.gmail.subprocess.run", side_effect=windows_decoding_process):
+            result = GmailAgentAdapter().get_message("message-ru")
+
+        self.assertEqual(result, russian_message)
+
     def test_only_read_commands_are_exposed(self) -> None:
         runner = ScriptedRunner(
             [
@@ -207,7 +233,17 @@ class GmailAgentReadOperationsTests(TestCase):
                     ],
                     True,
                 ),
-                (["gmail-agent", "message", "message-1", "--json"], True),
+                (
+                    [
+                        "gmail-agent",
+                        "message",
+                        "message-1",
+                        "--json",
+                        "--max-chars",
+                        "0",
+                    ],
+                    True,
+                ),
                 (["gmail-agent", "thread", "thread-1", "--json"], True),
             ],
         )
