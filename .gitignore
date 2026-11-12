@@ -1,0 +1,16 @@
+.env
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Credentials, local archives, indexes, and application state
+credentials.json
+token.json
+data/
+state/
+qdrant_storage/
+ollama_storage/
