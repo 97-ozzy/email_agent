@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Boot a configurable local CLI; 03: Import and persist recent email bodies
 
-**Status:** ready-for-agent
+**Status:** needs-info
 - [] Before chunking and indexing, email bodies are converted into clean, readable text using existing, lightweight Python libraries. Prefer BeautifulSoup for HTML-to-text conversion and email-reply-parser for removing quoted reply chains when applicable. Reuse existing dependencies where possible. Avoid custom HTML parsers, complex regex-based cleaning pipelines, and unnecessary abstractions.
 - [] Normalize whitespace and conservatively remove obvious email noise, such as quoted replies and signatures, only when reliably identifiable. If a library cannot safely identify removable content, preserve it rather than risk losing useful information. Do not introduce LLM-based cleaning.
 - [] Cleaning applies only to the derived text used for RAG indexing; original archived email bodies remain unchanged. Add tests for HTML, plain text, Cyrillic, quoted replies, signatures, and source preservation.
@@ -24,4 +24,39 @@
 - [ ] Email nodes use the one shared Qdrant collection reserved for both email and attachment nodes, with source metadata distinguishing their types.
 - [ ] SQLite and locally archived source text remain authoritative; Qdrant is treated as a rebuildable derived index.
 - [ ] Before implementation, installed-version compatibility is verified for Russian-language FastEmbed BM25 tokenization, Qdrant/LlamaIndex RRF, supported metadata filters, deterministic node IDs, and idempotent point updates; findings are captured in implementation notes or tests.
+
+## Implementation notes
+
+Compatibility gate started on 2026-11-12 by temporarily resolving and installing the
+following current package releases with `uv add`; they were removed again after the blocking
+contract mismatch was confirmed so the project would not retain a partial retrieval stack:
+
+- `llama-index-core==0.14.25`
+- `llama-index-vector-stores-qdrant==0.10.4`
+- `llama-index-embeddings-ollama==0.10.0`
+- `qdrant-client==1.20.0`
+- `fastembed==0.9.1`
+
+FastEmbed's `Qdrant/bm25` tokenizer preserves Russian terms (for example, `Оплата
+по счёту договор АБВ-123` tokenizes to the corresponding Cyrillic words and
+identifier parts), so Russian lexical retrieval is viable.
+
+Implementation is blocked by the required fusion contract. In
+`llama-index-vector-stores-qdrant==0.10.4`, `QdrantVectorStore(enable_hybrid=True)`
+defaults to LlamaIndex's `relative_score_fusion`; the integration does not expose an existing
+RRF implementation. `qdrant-client==1.20.0` exposes Qdrant's native `Fusion.RRF`, but using it
+would require bypassing or extending the required LlamaIndex hybrid retriever. Supplying a
+project-defined `hybrid_fusion_fn` would directly violate the requirement against
+application-defined fusion.
+
+The specification requires implementation to stop when a required interface is unavailable.
+Consequently, metadata-filter support, deterministic node IDs, and idempotent point updates
+were not evaluated and remain pending after the fusion contract is resolved. The compatibility
+gate is not complete.
+
+Choose one of these contract changes before returning the ticket to `ready-for-agent`:
+
+1. Accept LlamaIndex's built-in relative-score fusion.
+2. Allow direct Qdrant Query API hybrid retrieval with native RRF.
+3. Allow a project-defined RRF callback passed to `QdrantVectorStore`.
 
