@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from subprocess import CompletedProcess
 from unittest import TestCase
+from unittest.mock import patch
 
 from email_agent.gmail import GmailAccessError, GmailAgentAdapter
 
@@ -114,6 +116,36 @@ class GmailAgentAuthenticationTests(TestCase):
 
 
 class GmailAgentReadOperationsTests(TestCase):
+    def test_search_handles_unicode_not_supported_by_windows_console_encoding(self) -> None:
+        def encoding_sensitive_process(
+            command: list[str],
+            **kwargs: object,
+        ) -> CompletedProcess[str]:
+            environment = kwargs.get("env")
+            if not isinstance(environment, Mapping) or environment.get(
+                "PYTHONIOENCODING"
+            ) != "utf-8":
+                return CompletedProcess(
+                    command,
+                    1,
+                    stdout="",
+                    stderr=(
+                        "UnicodeEncodeError: 'charmap' codec can't encode "
+                        "character '\\u200c'"
+                    ),
+                )
+            return CompletedProcess(
+                command,
+                0,
+                stdout='{"messages": [{"subject": "Ozon\u200c"}]}',
+                stderr="",
+            )
+
+        with patch("email_agent.gmail.subprocess.run", side_effect=encoding_sensitive_process):
+            result = GmailAgentAdapter().search_messages("Ozon")
+
+        self.assertEqual(result, {"messages": [{"subject": "Ozon\u200c"}]})
+
     def test_only_read_commands_are_exposed(self) -> None:
         runner = ScriptedRunner(
             [

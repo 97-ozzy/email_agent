@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -109,11 +110,14 @@ class GmailAgentAdapter:
 
 
 def _run_command(command: list[str], capture_output: bool) -> CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["PYTHONIOENCODING"] = "utf-8"
     try:
         return subprocess.run(  # noqa: S603 - fixed executable and read-only command vocabulary
             command,
             check=False,
             capture_output=capture_output,
+            env=environment,
             text=True,
         )
     except FileNotFoundError:
