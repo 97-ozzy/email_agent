@@ -1,7 +1,8 @@
 # Email Agent
 
-Email Agent is a local, read-only email AI agent. Ticket 01 provides the configurable CLI
-bootstrap and local Qdrant/Ollama diagnostics; Gmail ingestion and chat arrive in later tickets.
+Email Agent is a local, read-only email AI agent. It provides a configurable CLI, local
+Qdrant/Ollama diagnostics, and live read-only Gmail search and retrieval. Gmail ingestion and
+chat arrive in later tickets.
 
 ## Requirements
 
@@ -50,20 +51,43 @@ restarts and `docker compose down`. To deliberately remove all service data, run
 uv run --locked email-agent
 ```
 
-Startup reports Qdrant and Ollama separately. If Ollama is running but `bge-m3` is missing, the
-CLI asks before downloading it. You may also install it yourself with `ollama pull bge-m3`.
+On the first run, the application delegates Gmail authorization to the open-source
+[`gmail-agent`](https://github.com/dremok/gmail-agent) integration. Its setup opens the Google
+Cloud and OAuth pages in your browser and always requests the `gmail.readonly` scope. If an OAuth
+client is already installed but its login is missing or expired, a read-only browser login starts
+instead. Later runs reuse the saved token and refresh it when possible.
+
+`gmail-agent` stores its OAuth client and token outside this repository in its user configuration
+directory (normally `~/.config/gmail-agent`). It writes the directory and token with owner-only
+permissions. Treat both files as secrets and never copy them into the project. To inspect the
+login without printing credentials, run `uv run --locked gmail-agent status`.
+
+Startup reports Gmail, Qdrant, and Ollama separately. A Gmail failure does not hide local-service
+status. If Ollama is running but `bge-m3` is missing, the CLI asks before downloading it. You may
+also install it yourself with `ollama pull bge-m3`.
 
 Interactive commands in this ticket:
 
 - `/help` — list supported commands
-- `/status` — refresh Qdrant, Ollama, and embedding-model diagnostics
+- `/status` - refresh Gmail, Qdrant, Ollama, and embedding-model diagnostics
+- `/gmail-search QUERY` - search live Gmail using Gmail search syntax
+- `/gmail-message ID` - retrieve one complete live Gmail message
+- `/gmail-thread ID` - retrieve one live Gmail conversation
 - `/exit` — leave cleanly
+
+The application exposes no Gmail send, draft, delete, archive, or label-modification command.
+If an existing `gmail-agent` login has a broader access level, startup replaces it with a new
+read-only authorization before Gmail becomes available.
 
 ## Troubleshooting
 
 - A configuration error names every missing or invalid environment variable and exits without a
   traceback.
 - If a service is unavailable, start it with `docker compose up -d` and use `/status` again.
+- If Gmail authorization is cancelled or rejected, follow the exact `gmail-agent setup` or
+  `gmail-agent login --scope readonly` command shown by `/status`.
+- If a personal OAuth app remains in Google Testing mode, its refresh token may expire after seven
+  days; publish the app for personal production use or repeat the read-only login.
 - Use `docker compose logs qdrant ollama` to inspect container failures.
 - Set `EMAIL_AGENT_DEBUG=true` to allow detailed Python tracebacks while developing.
 

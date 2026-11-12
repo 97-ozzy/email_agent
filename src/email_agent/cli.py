@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -10,13 +11,17 @@ from typing import TextIO
 from dotenv import load_dotenv
 
 from email_agent.config import ConfigurationError, Settings
+from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
 
 load_dotenv()
 
 HELP_TEXT = """Supported commands:
   /help    Display supported commands
-  /status  Check Qdrant, Ollama, and the embedding model
+  /status  Check Gmail, Qdrant, Ollama, and the embedding model
+  /gmail-search QUERY  Search live Gmail
+  /gmail-message ID    Open one live Gmail message
+  /gmail-thread ID     Open one live Gmail conversation
   /exit    Exit the application
 """
 
@@ -28,6 +33,7 @@ def run_application(
     stdout: TextIO,
     stderr: TextIO,
     services_factory: Callable[[Settings], ServiceAdapter] | None = None,
+    gmail_factory: Callable[[], GmailAdapter] | None = None,
 ) -> int:
     """Validate configuration and run the interactive application."""
     try:
@@ -40,8 +46,9 @@ def run_application(
         return 2
 
     factory = services_factory or HttpServiceAdapter
+    create_gmail = gmail_factory or GmailAgentAdapter
     try:
-        return run_cli(settings, factory(settings), stdin, stdout)
+        return run_cli(settings, factory(settings), create_gmail(), stdin, stdout)
     except Exception as exc:
         if settings.debug:
             raise
@@ -53,13 +60,21 @@ def run_application(
 def run_cli(
     settings: Settings,
     services: ServiceAdapter,
+    gmail: GmailAdapter,
     stdin: TextIO,
     stdout: TextIO,
 ) -> int:
     """Run the terminal conversation using an injected service boundary."""
     stdout.write("Email Agent\n")
-    status = services.status(settings.embedding_model)
-    _write_status(stdout, status, settings.embedding_model)
+    gmail_status = _checked_gmail_status(gmail.ensure_authenticated)
+    status, local_problem = _checked_service_status(services, settings.embedding_model)
+    _write_status(
+        stdout,
+        status,
+        gmail_status,
+        settings.embedding_model,
+        local_problem=local_problem,
+    )
     if status.ollama_available and not status.embedding_model_available:
         _offer_model_download(settings, services, stdin, stdout)
 
@@ -81,8 +96,36 @@ def run_cli(
         if command == "/help":
             stdout.write(HELP_TEXT)
         elif command == "/status":
+            status, local_problem = _checked_service_status(
+                services, settings.embedding_model
+            )
             _write_status(
-                stdout, services.status(settings.embedding_model), settings.embedding_model
+                stdout,
+                status,
+                _checked_gmail_status(gmail.status),
+                settings.embedding_model,
+                local_problem=local_problem,
+            )
+        elif command.startswith("/gmail-search "):
+            query = command.removeprefix("/gmail-search ")
+            _try_write_gmail_result(
+                stdout,
+                gmail.search_messages,
+                query,
+            )
+        elif command.startswith("/gmail-message "):
+            message_id = command.removeprefix("/gmail-message ")
+            _try_write_gmail_result(
+                stdout,
+                gmail.get_message,
+                message_id,
+            )
+        elif command.startswith("/gmail-thread "):
+            thread_id = command.removeprefix("/gmail-thread ")
+            _try_write_gmail_result(
+                stdout,
+                gmail.get_thread,
+                thread_id,
             )
         elif command.startswith("/"):
             stdout.write(f"Unknown command: {command}. Type /help for supported commands.\n")
@@ -92,14 +135,65 @@ def run_cli(
             )
 
 
-def _write_status(stdout: TextIO, status: ServiceStatus, embedding_model: str) -> None:
+def _try_write_gmail_result(
+    stdout: TextIO,
+    operation: Callable[[str], object],
+    argument: str,
+) -> None:
+    try:
+        result = operation(argument)
+    except GmailAccessError as exc:
+        stdout.write(f"Gmail unavailable: {exc}\n")
+    else:
+        stdout.write(json.dumps(result, indent=2, ensure_ascii=False))
+        stdout.write("\n")
+
+
+def _write_status(
+    stdout: TextIO,
+    status: ServiceStatus,
+    gmail_status: GmailStatus,
+    embedding_model: str,
+    *,
+    local_problem: str | None = None,
+) -> None:
+    gmail_text = "available"
+    if gmail_status.available and gmail_status.account:
+        gmail_text += f" ({gmail_status.account})"
+    elif not gmail_status.available:
+        gmail_text = "unavailable"
+        if gmail_status.problem:
+            gmail_text += f" ({gmail_status.problem})"
+    stdout.write(f"Gmail: {gmail_text}\n")
     stdout.write(f"Qdrant: {'available' if status.qdrant_available else 'unavailable'}\n")
     stdout.write(f"Ollama: {'available' if status.ollama_available else 'unavailable'}\n")
+    if local_problem:
+        stdout.write(f"Local service diagnostics: unavailable ({local_problem})\n")
     if not status.ollama_available:
         model_status = "unavailable (Ollama is unavailable)"
     else:
         model_status = "installed" if status.embedding_model_available else "missing"
     stdout.write(f"Embedding model {embedding_model}: {model_status}\n")
+
+
+def _checked_service_status(
+    services: ServiceAdapter,
+    embedding_model: str,
+) -> tuple[ServiceStatus, str | None]:
+    try:
+        return services.status(embedding_model), None
+    except Exception:
+        return ServiceStatus(False, False, False), "check Qdrant and Ollama, then retry /status"
+
+
+def _checked_gmail_status(check: Callable[[], GmailStatus]) -> GmailStatus:
+    try:
+        return check()
+    except Exception:
+        return GmailStatus(
+            available=False,
+            problem="Gmail diagnostics failed; run `gmail-agent status` for details",
+        )
 
 
 def _offer_model_download(
