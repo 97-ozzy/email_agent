@@ -174,6 +174,18 @@ class SQLiteArchive:
             ).fetchone()[0]
         return ArchiveState(int(completed), int(failed), bool(initialized))
 
+    def message_body_path(self, message_id: str) -> Path:
+        """Return the preserved source-body path for an archived message."""
+        with closing(self._connect()) as database:
+            row = database.execute(
+                "SELECT body_path FROM messages "
+                "WHERE gmail_message_id = ? AND ingestion_status = 'downloaded'",
+                (message_id,),
+            ).fetchone()
+        if row is None or not row[0]:
+            raise ArchiveError(f"message {message_id} has no archived body")
+        return self.data_dir / str(row[0])
+
     def mark_initial_import_attempted(self) -> None:
         """Prevent later startups from treating newly arrived mail as the initial archive."""
         now = datetime.now(UTC).isoformat()

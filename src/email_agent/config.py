@@ -29,6 +29,8 @@ class Settings:
     initial_import_limit: int = 100
     data_dir: Path = Path("data")
     attachment_max_bytes: int = 20 * 1024 * 1024
+    search_context_chars: int = 1_000_000
+    search_context_tokens: int = 6000
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Settings:
@@ -77,6 +79,20 @@ class Settings:
         if attachment_max_bytes < 1:
             problems.append("EMAIL_AGENT_ATTACHMENT_MAX_BYTES must be a positive integer")
 
+        try:
+            context_chars = int(environ.get("EMAIL_AGENT_SEARCH_CONTEXT_CHARS", "1000000"))
+            if context_chars < 1:
+                raise ValueError
+        except ValueError:
+            context_chars = 0
+            problems.append("EMAIL_AGENT_SEARCH_CONTEXT_CHARS must be positive")
+        try:
+            context_tokens = int(environ.get("EMAIL_AGENT_SEARCH_CONTEXT_TOKENS", "6000"))
+            if context_tokens < 1:
+                raise ValueError
+        except ValueError:
+            context_tokens = 0
+            problems.append("EMAIL_AGENT_SEARCH_CONTEXT_TOKENS must be positive")
         if problems:
             raise ConfigurationError(problems)
 
@@ -90,4 +106,6 @@ class Settings:
             initial_import_limit=initial_import_limit,
             data_dir=Path(data_dir_value),
             attachment_max_bytes=attachment_max_bytes,
+            search_context_chars=context_chars,
+            search_context_tokens=context_tokens,
         )

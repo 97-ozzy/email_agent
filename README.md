@@ -103,6 +103,25 @@ read-only authorization before Gmail becomes available.
 
 ## Tests
 
+### Local email search
+
+Run `/search QUERY` to index archived email bodies and retrieve passages using Ollama `bge-m3`
+and FastEmbed BM25 with LlamaIndex's built-in relative-score fusion. Qdrant and Ollama must be
+running. The first BM25 use downloads its small tokenizer resources.
+
+For example: `/search invoice --sender alice@example.com --after 2026-11-01 --before 2026-11-30
+--limit 3 --source email`. Dates are inclusive UTC calendar dates; sender matches an email
+address. Results default to 8, with a range of 1–20. `EMAIL_AGENT_SEARCH_CONTEXT_TOKENS` bounds
+total passage text (default 6000 tokens), while source metadata remains complete. An optional
+additional character ceiling is available through `EMAIL_AGENT_SEARCH_CONTEXT_CHARS`.
+
+Index processing state and the LlamaIndex document store persist beneath the data directory;
+Qdrant uses the existing Compose volume. Changed sources replace old chunks. Original archived
+bodies remain intact. Search returns evidence directly without calling a generative model.
+Attachment indexing is covered by a later ticket.
+
+### Running checks
+
 The CLI/application tests use controlled service adapters and do not require Docker or secrets:
 
 ```shell

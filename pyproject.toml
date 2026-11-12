@@ -11,11 +11,18 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Email Agent contributors" }]
 dependencies = [
+    "beautifulsoup4>=4.12",
     "docx2txt>=0.9",
+    "email-reply-parser>=0.5.12",
     "gmail-agent>=0.3.0,<0.4",
+    "llama-index-core>=0.14",
+    "llama-index-embeddings-ollama>=0.8",
     "llama-index-readers-file>=0.7.0",
+    "llama-index-vector-stores-qdrant>=0.9",
     "pypdf>=6.21.4",
     "python-dotenv>=1.2.4",
+    "qdrant-client[fastembed]>=1.16",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]

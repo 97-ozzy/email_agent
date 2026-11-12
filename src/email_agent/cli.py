@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from collections.abc import Callable, Mapping
+from datetime import date
 from typing import TextIO
 
 from dotenv import load_dotenv
@@ -15,6 +17,7 @@ from email_agent.attachments import AttachmentReport, process_pending_attachment
 from email_agent.config import ConfigurationError, Settings
 from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
 from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
+from email_agent.search import SearchBackend, SearchRequest, SearchResult
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
 
 load_dotenv()
@@ -22,6 +25,9 @@ load_dotenv()
 HELP_TEXT = """Supported commands:
   /help    Display supported commands
   /status  Check Gmail, Qdrant, Ollama, and the embedding model
+  /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
+                [--source email|attachment]
+            Search the persistent local hybrid index
   /gmail-search QUERY  Search live Gmail
   /gmail-message ID    Open one live Gmail message
   /gmail-thread ID     Open one live Gmail conversation
@@ -37,6 +43,7 @@ def run_application(
     stderr: TextIO,
     services_factory: Callable[[Settings], ServiceAdapter] | None = None,
     gmail_factory: Callable[[], GmailAdapter] | None = None,
+    search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
 ) -> int:
     """Validate configuration and run the interactive application."""
     try:
@@ -51,7 +58,14 @@ def run_application(
     factory = services_factory or HttpServiceAdapter
     create_gmail = gmail_factory or GmailAgentAdapter
     try:
-        return run_cli(settings, factory(settings), create_gmail(), stdin, stdout)
+        return run_cli(
+            settings,
+            factory(settings),
+            create_gmail(),
+            stdin,
+            stdout,
+            search_factory=search_factory,
+        )
     except Exception as exc:
         if settings.debug:
             raise
@@ -66,6 +80,8 @@ def run_cli(
     gmail: GmailAdapter,
     stdin: TextIO,
     stdout: TextIO,
+    *,
+    search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
 ) -> int:
     """Run the terminal conversation using an injected service boundary."""
     stdout.write("Email Agent\n")
@@ -78,13 +94,11 @@ def run_cli(
         settings.embedding_model,
         local_problem=local_problem,
     )
+    archive = SQLiteArchive(settings.data_dir)
     if gmail_status.available:
-        archive = SQLiteArchive(settings.data_dir)
         archive_state = archive.state()
         if archive_state.failed:
-            report = retry_failed_messages(
-                gmail, archive, settings.attachment_max_bytes
-            )
+            report = retry_failed_messages(gmail, archive, settings.attachment_max_bytes)
             _write_import_report(stdout, report, action="Retry import")
         elif archive_state.exists:
             _write_archive_reuse(stdout, archive_state)
@@ -107,6 +121,7 @@ def run_cli(
     if status.ollama_available and not status.embedding_model_available:
         _offer_model_download(settings, services, stdin, stdout)
 
+    search_backend: SearchBackend | None = None
     stdout.write("Type /help for commands.\n")
     while True:
         stdout.write("email-agent> ")
@@ -125,9 +140,7 @@ def run_cli(
         if command == "/help":
             stdout.write(HELP_TEXT)
         elif command == "/status":
-            status, local_problem = _checked_service_status(
-                services, settings.embedding_model
-            )
+            status, local_problem = _checked_service_status(services, settings.embedding_model)
             _write_status(
                 stdout,
                 status,
@@ -135,6 +148,22 @@ def run_cli(
                 settings.embedding_model,
                 local_problem=local_problem,
             )
+        elif command.startswith("/search"):
+            try:
+                request = _parse_search_request(command)
+                if search_backend is None:
+                    if search_factory is None:
+                        from email_agent.retrieval import HybridSearchIndex
+
+                        search_backend = HybridSearchIndex(settings, archive)
+                    else:
+                        search_backend = search_factory(settings, archive)
+                search_backend.refresh()
+                _write_search_results(stdout, search_backend.search(request))
+            except ValueError as exc:
+                stdout.write(f"Search error: {exc}\n")
+            except Exception as exc:
+                stdout.write(f"Search unavailable: {exc}\n")
         elif command.startswith("/gmail-search "):
             query = command.removeprefix("/gmail-search ")
             _try_write_gmail_result(
@@ -162,6 +191,79 @@ def run_cli(
             stdout.write(
                 "Chat is not configured in this bootstrap ticket. Type /help for commands.\n"
             )
+
+
+def _parse_search_request(command: str) -> SearchRequest:
+    tokens = shlex.split(command)[1:]
+    query_parts: list[str] = []
+    values: dict[str, str] = {}
+    option_names = {
+        "--limit": "limit",
+        "--sender": "sender",
+        "--after": "date_from",
+        "--before": "date_to",
+        "--source": "source_type",
+    }
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in option_names:
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("--"):
+                raise ValueError(f"{token} requires a value")
+            values[option_names[token]] = tokens[index + 1]
+            index += 2
+            continue
+        if token.startswith("--"):
+            raise ValueError(f"unknown search option: {token}")
+        query_parts.append(token)
+        index += 1
+
+    query = " ".join(query_parts).strip()
+    if not query:
+        raise ValueError("provide a search query")
+    try:
+        limit = int(values.get("limit", "8"))
+    except ValueError as exc:
+        raise ValueError("--limit must be an integer") from exc
+    if not 1 <= limit <= 20:
+        raise ValueError("--limit must be between 1 and 20")
+    for option, key in (("--after", "date_from"), ("--before", "date_to")):
+        if key in values:
+            try:
+                date.fromisoformat(values[key])
+            except ValueError as exc:
+                raise ValueError(f"{option} must use YYYY-MM-DD") from exc
+    source_type = values.get("source_type")
+    if source_type not in {None, "email", "attachment"}:
+        raise ValueError("--source must be email or attachment")
+    return SearchRequest(
+        query=query,
+        limit=limit,
+        sender=values.get("sender"),
+        date_from=values.get("date_from"),
+        date_to=values.get("date_to"),
+        source_type=source_type,
+    )
+
+
+def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
+    if not results:
+        stdout.write("No archived email passages matched the search.\n")
+        return
+    for position, result in enumerate(results, start=1):
+        stdout.write(f"Result {position} (score {result.score:.3f})\n")
+        stdout.write(f"{result.text}\n")
+        stdout.write(
+            f"document_id: {result.document_id}\n"
+            f"gmail_message_id: {result.gmail_message_id}\n"
+            f"thread_id: {result.thread_id}\n"
+            f"source_type: {result.source_type}\n"
+            f"title: {result.title}\n"
+            f"timestamp: {result.timestamp}\n"
+            f"sender: {result.sender}\n"
+        )
+        if result.location:
+            stdout.write(f"location: {result.location}\n")
 
 
 def _write_import_report(
@@ -194,17 +296,14 @@ def _write_attachment_report(stdout: TextIO, attachments: AttachmentReport) -> N
 
 def _write_archive_reuse(stdout: TextIO, state: ArchiveState) -> None:
     stdout.write(
-        f"Local archive: reused {state.completed} completed messages, "
-        f"failed {state.failed}.\n"
+        f"Local archive: reused {state.completed} completed messages, failed {state.failed}.\n"
     )
     if state.failed:
         _write_incomplete_archive_warning(stdout)
 
 
 def _write_incomplete_archive_warning(stdout: TextIO) -> None:
-    stdout.write(
-        "Warning: the local archive is incomplete; completed messages remain usable.\n"
-    )
+    stdout.write("Warning: the local archive is incomplete; completed messages remain usable.\n")
 
 
 def _try_write_gmail_result(

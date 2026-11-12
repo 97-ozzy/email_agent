@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from llama_index.core.schema import Document
-from llama_index.readers.file import DocxReader, FlatReader, PDFReader  # type: ignore[import-untyped]
+from llama_index.readers.file import DocxReader, FlatReader, PDFReader
 
 from email_agent.archive import (
     AttachmentSource,

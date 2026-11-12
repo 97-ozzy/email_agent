@@ -378,7 +378,7 @@ The agreed components are:
 | Embedding runtime | LlamaIndex `OllamaEmbedding` |
 | Embedding model | `bge-m3` |
 | Sparse retrieval | FastEmbed BM25 |
-| Retrieval fusion | Qdrant/LlamaIndex Reciprocal Rank Fusion |
+| Retrieval fusion | LlamaIndex built-in relative-score fusion |
 | Relational metadata | SQLite |
 | Local source storage | Configurable local directory |
 | Document processing | LlamaIndex readers |
@@ -670,11 +670,11 @@ The retrieval system combines:
 
 - Dense vector similarity using `bge-m3`.
 - BM25-based sparse/lexical search.
-- Reciprocal Rank Fusion for combining results.
+- LlamaIndex's built-in `relative_score_fusion` for combining results.
 
 Use LlamaIndex `QdrantVectorStore` with hybrid retrieval enabled. Dense vectors are produced
 by `OllamaEmbedding` using `bge-m3`; sparse vectors are produced by FastEmbed BM25. Use the
-Qdrant/LlamaIndex Reciprocal Rank Fusion path supplied by the installed integration. Do not
+LlamaIndex `relative_score_fusion` path supplied by the installed integration. Do not
 implement tokenization, BM25 scoring, rank fusion, or vector search in application code.
 
 Build a LlamaIndex `VectorStoreIndex` over one Qdrant collection containing both email and
