@@ -11,7 +11,10 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Email Agent contributors" }]
 dependencies = [
+    "docx2txt>=0.9",
     "gmail-agent>=0.3.0,<0.4",
+    "llama-index-readers-file>=0.7.0",
+    "pypdf>=6.21.4",
     "python-dotenv>=1.2.4",
 ]
 

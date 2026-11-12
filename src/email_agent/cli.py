@@ -11,6 +11,7 @@ from typing import TextIO
 from dotenv import load_dotenv
 
 from email_agent.archive import ArchiveState, SQLiteArchive
+from email_agent.attachments import AttachmentReport, process_pending_attachments
 from email_agent.config import ConfigurationError, Settings
 from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
 from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
@@ -81,15 +82,26 @@ def run_cli(
         archive = SQLiteArchive(settings.data_dir)
         archive_state = archive.state()
         if archive_state.failed:
-            report = retry_failed_messages(gmail, archive)
+            report = retry_failed_messages(
+                gmail, archive, settings.attachment_max_bytes
+            )
             _write_import_report(stdout, report, action="Retry import")
         elif archive_state.exists:
             _write_archive_reuse(stdout, archive_state)
+            _write_attachment_report(
+                stdout,
+                process_pending_attachments(
+                    gmail,
+                    archive,
+                    settings.attachment_max_bytes,
+                ),
+            )
         else:
             report = import_recent_messages(
                 gmail,
                 archive,
                 settings.initial_import_limit,
+                settings.attachment_max_bytes,
             )
             _write_import_report(stdout, report)
     if status.ollama_available and not status.embedding_model_available:
@@ -166,8 +178,18 @@ def _write_import_report(
     if report.reused:
         stdout.write(f", reused {report.reused}")
     stdout.write(".\n")
+    _write_attachment_report(stdout, report.attachments)
     if report.failed:
         _write_incomplete_archive_warning(stdout)
+
+
+def _write_attachment_report(stdout: TextIO, attachments: AttachmentReport) -> None:
+    stdout.write(
+        "Attachments: "
+        f"downloaded {attachments.downloaded}, parsed {attachments.parsed}, "
+        f"indexed {attachments.indexed}, unsupported {attachments.unsupported}, "
+        f"oversized {attachments.oversized}, failed {attachments.failed}.\n"
+    )
 
 
 def _write_archive_reuse(stdout: TextIO, state: ArchiveState) -> None:

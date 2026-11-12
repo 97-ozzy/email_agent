@@ -7,7 +7,9 @@ import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from subprocess import CompletedProcess
+from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol, cast
 
 READONLY_LEVEL = "readonly"
@@ -71,7 +73,6 @@ class GmailAdapter(Protocol):
     def get_thread(self, thread_id: str) -> object:
         """Retrieve one Gmail conversation."""
 
-
 class GmailAgentAdapter:
     """Adapter for the open-source gmail-agent integration."""
 
@@ -131,6 +132,41 @@ class GmailAgentAdapter:
 
     def get_thread(self, thread_id: str) -> object:
         return self._read_json("thread", thread_id)
+
+    def list_attachments(self, message_id: str) -> object:
+        return self._run_json_command(
+            ["gmail-agent", "attachments", message_id, "--json"],
+            "attachment listing",
+        )
+
+    def download_attachment(self, message_id: str, part_id: str) -> bytes:
+        with TemporaryDirectory() as directory:
+            payload = self._run_json_command(
+                [
+                    "gmail-agent",
+                    "download",
+                    message_id,
+                    "--json",
+                    "--out-dir",
+                    directory,
+                    "--name",
+                    part_id,
+                ],
+                "attachment download",
+            )
+            if not isinstance(payload, dict) or not isinstance(payload.get("saved"), list):
+                raise GmailAccessError("Gmail attachment download returned an invalid response")
+            saved = payload["saved"]
+            if len(saved) != 1 or not isinstance(saved[0], dict):
+                raise GmailAccessError("Gmail attachment download returned an invalid file list")
+            raw_path = saved[0].get("path")
+            if not isinstance(raw_path, str):
+                raise GmailAccessError("Gmail attachment download returned an invalid path")
+            path = Path(raw_path).resolve()
+            root = Path(directory).resolve()
+            if not path.is_relative_to(root) or not path.is_file():
+                raise GmailAccessError("Gmail attachment download returned an unsafe path")
+            return path.read_bytes()
 
     def _status_details(self) -> dict[str, object]:
         result = self._runner(["gmail-agent", "status", "--json"], True)

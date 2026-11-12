@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from email_agent.archive import SQLiteArchive
+from email_agent.attachments import AttachmentReport, process_message_attachments
 from email_agent.gmail import GmailAdapter
 
 IMPORT_QUERY = "in:inbox OR in:sent"
@@ -21,12 +22,14 @@ class ImportReport:
     processed: int
     failed: int
     reused: int
+    attachments: AttachmentReport = AttachmentReport()
 
 
 def import_recent_messages(
     gmail: GmailAdapter,
     archive: SQLiteArchive,
     limit: int,
+    attachment_maximum_bytes: int = 20 * 1024 * 1024,
 ) -> ImportReport:
     """Discover, download, and archive up to ``limit`` newest unique messages."""
     selected, discovery_failures = _discover_recent_messages(gmail, limit)
@@ -35,6 +38,7 @@ def import_recent_messages(
     processed = 0
     failed = discovery_failures
     reused = 0
+    attachments = AttachmentReport()
 
     for summary in selected:
         message_id = cast(str, summary["id"])
@@ -48,21 +52,34 @@ def import_recent_messages(
             downloaded += 1
             archive.store_message({**summary, **cast(dict[str, object], detail)})
             processed += 1
+            attachments = attachments.merge(
+                process_message_attachments(
+                    gmail,
+                    archive,
+                    message_id,
+                    attachment_maximum_bytes,
+                )
+            )
         except Exception as exc:
             failed += 1
             with suppress(Exception):
                 archive.record_failure(summary, str(exc) or type(exc).__name__)
 
     archive.mark_initial_import_attempted()
-    return ImportReport(limit, downloaded, processed, failed, reused)
+    return ImportReport(limit, downloaded, processed, failed, reused, attachments)
 
 
-def retry_failed_messages(gmail: GmailAdapter, archive: SQLiteArchive) -> ImportReport:
+def retry_failed_messages(
+    gmail: GmailAdapter,
+    archive: SQLiteArchive,
+    attachment_maximum_bytes: int = 20 * 1024 * 1024,
+) -> ImportReport:
     """Retry failed IDs without discovering or redownloading completed messages."""
     failed_ids = archive.failed_message_ids()
     downloaded = 0
     processed = 0
     failed = 0
+    attachments = AttachmentReport()
 
     for message_id in failed_ids:
         summary: dict[str, object] = {"id": message_id}
@@ -73,12 +90,22 @@ def retry_failed_messages(gmail: GmailAdapter, archive: SQLiteArchive) -> Import
             downloaded += 1
             archive.store_message({**cast(dict[str, object], detail), "id": message_id})
             processed += 1
+            attachments = attachments.merge(
+                process_message_attachments(
+                    gmail,
+                    archive,
+                    message_id,
+                    attachment_maximum_bytes,
+                )
+            )
         except Exception as exc:
             failed += 1
             with suppress(Exception):
                 archive.record_failure(summary, str(exc) or type(exc).__name__)
 
-    return ImportReport(len(failed_ids), downloaded, processed, failed, reused=0)
+    return ImportReport(
+        len(failed_ids), downloaded, processed, failed, reused=0, attachments=attachments
+    )
 
 
 def _discover_recent_messages(

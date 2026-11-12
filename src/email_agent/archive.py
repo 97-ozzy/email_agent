@@ -10,6 +10,11 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
+
+AttachmentProcessingStatus = Literal[
+    "downloaded", "parsed", "skipped", "unsupported", "failed"
+]
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,38 @@ class _StoredMessageState:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class AttachmentSource:
+    """Original Gmail metadata for one message-to-attachment occurrence."""
+
+    part_id: str
+    attachment_id: str
+    filename: str
+    mime_type: str
+    reported_size: int
+    inline: bool
+    source_metadata: str
+
+
+@dataclass(frozen=True)
+class ExtractedAttachmentDocument:
+    """One stable, persisted document produced by an attachment reader."""
+
+    document_id: str
+    text: str
+    metadata: str
+
+
+@dataclass(frozen=True)
+class StoredAttachmentOccurrence:
+    """Previously persisted state used to resume attachment processing."""
+
+    occurrence_id: int
+    content_sha256: str | None
+    content_path: Path | None
+    processing_status: str
+
+
 class ArchiveError(ValueError):
     """Raised when a Gmail message cannot be represented in the local archive."""
 
@@ -80,7 +117,11 @@ class SQLiteArchive:
         self.data_dir = data_dir
         self.database_path = data_dir / "archive.sqlite3"
         self.messages_dir = data_dir / "messages"
+        self.attachments_dir = data_dir / "attachments"
+        self.extracted_dir = data_dir / "extracted"
         self.messages_dir.mkdir(parents=True, exist_ok=True)
+        self.attachments_dir.mkdir(parents=True, exist_ok=True)
+        self.extracted_dir.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     def completed_message_ids(self) -> set[str]:
@@ -97,6 +138,27 @@ class SQLiteArchive:
             rows = database.execute(
                 "SELECT gmail_message_id FROM ingestion_failures "
                 "ORDER BY updated_at, gmail_message_id"
+            )
+            return [str(row[0]) for row in rows]
+
+    def pending_attachment_message_ids(self) -> list[str]:
+        """Return archived messages whose attachment scan is absent or has failures."""
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                """
+                SELECT DISTINCT messages.gmail_message_id
+                FROM messages
+                LEFT JOIN attachment_scan_state
+                    ON attachment_scan_state.gmail_message_id = messages.gmail_message_id
+                LEFT JOIN message_attachments
+                    ON message_attachments.gmail_message_id = messages.gmail_message_id
+                WHERE messages.ingestion_status = 'downloaded'
+                  AND (
+                    attachment_scan_state.gmail_message_id IS NULL
+                    OR message_attachments.processing_status = 'failed'
+                  )
+                ORDER BY messages.gmail_message_id
+                """
             )
             return [str(row[0]) for row in rows]
 
@@ -182,6 +244,230 @@ class SQLiteArchive:
                     problem=problem[:1000],
                     updated_at=now,
                 ),
+            )
+
+    def store_attachment(
+        self,
+        message_id: str,
+        source: AttachmentSource,
+        content: bytes | None,
+        *,
+        status: AttachmentProcessingStatus,
+        problem: str | None = None,
+    ) -> tuple[int, str | None, Path | None]:
+        """Persist an occurrence and, when available, its content-addressed bytes."""
+        digest: str | None = None
+        relative_path: Path | None = None
+        if content is not None:
+            digest = hashlib.sha256(content).hexdigest()
+            relative_path = Path("attachments") / digest[:2] / digest
+            destination = self.data_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if not destination.exists():
+                temporary_path = destination.with_suffix(".tmp")
+                temporary_path.write_bytes(content)
+                temporary_path.replace(destination)
+
+        now = datetime.now(UTC).isoformat()
+        with closing(self._connect()) as database, database:
+            if digest is not None and relative_path is not None and content is not None:
+                database.execute(
+                    """
+                    INSERT OR IGNORE INTO attachment_blobs (
+                        content_sha256, byte_size, storage_path, extraction_status,
+                        failure_reason, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'downloaded', NULL, ?, ?)
+                    """,
+                    (digest, len(content), relative_path.as_posix(), now, now),
+                )
+            database.execute(
+                """
+                INSERT INTO message_attachments (
+                    gmail_message_id, part_id, gmail_attachment_id, filename, mime_type,
+                    reported_size, inline, source_metadata, content_sha256,
+                    processing_status, indexing_status, failure_reason, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(gmail_message_id, part_id) DO UPDATE SET
+                    gmail_attachment_id = excluded.gmail_attachment_id,
+                    filename = excluded.filename,
+                    mime_type = excluded.mime_type,
+                    reported_size = excluded.reported_size,
+                    inline = excluded.inline,
+                    source_metadata = excluded.source_metadata,
+                    content_sha256 = COALESCE(
+                        excluded.content_sha256, message_attachments.content_sha256
+                    ),
+                    processing_status = excluded.processing_status,
+                    failure_reason = excluded.failure_reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    message_id,
+                    source.part_id,
+                    source.attachment_id,
+                    source.filename,
+                    source.mime_type,
+                    source.reported_size,
+                    int(source.inline),
+                    source.source_metadata,
+                    digest,
+                    status,
+                    problem[:1000] if problem else None,
+                    now,
+                ),
+            )
+            row = database.execute(
+                "SELECT id FROM message_attachments WHERE gmail_message_id = ? AND part_id = ?",
+                (message_id, source.part_id),
+            ).fetchone()
+        if row is None:
+            raise ArchiveError("attachment occurrence could not be stored")
+        return int(row[0]), digest, self.data_dir / relative_path if relative_path else None
+
+    def attachment_occurrence(
+        self,
+        message_id: str,
+        part_id: str,
+    ) -> StoredAttachmentOccurrence | None:
+        """Return resumable state for one known Gmail attachment occurrence."""
+        with closing(self._connect()) as database:
+            row = database.execute(
+                """
+                SELECT message_attachments.id, message_attachments.content_sha256,
+                       attachment_blobs.storage_path,
+                       message_attachments.processing_status
+                FROM message_attachments
+                LEFT JOIN attachment_blobs
+                    ON attachment_blobs.content_sha256 = message_attachments.content_sha256
+                WHERE gmail_message_id = ? AND part_id = ?
+                """,
+                (message_id, part_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return StoredAttachmentOccurrence(
+            occurrence_id=int(row[0]),
+            content_sha256=str(row[1]) if row[1] is not None else None,
+            content_path=self.data_dir / str(row[2]) if row[2] is not None else None,
+            processing_status=str(row[3]),
+        )
+
+    def attachment_content_status(self, content_sha256: str) -> str | None:
+        """Return the shared extraction state for content-addressed bytes."""
+        with closing(self._connect()) as database:
+            row = database.execute(
+                "SELECT extraction_status FROM attachment_blobs WHERE content_sha256 = ?",
+                (content_sha256,),
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def mark_attachment_scan_complete(self, message_id: str) -> None:
+        """Record that Gmail attachment metadata was successfully enumerated."""
+        now = datetime.now(UTC).isoformat()
+        with closing(self._connect()) as database, database:
+            database.execute(
+                """
+                INSERT INTO attachment_scan_state (gmail_message_id, scanned_at)
+                VALUES (?, ?)
+                ON CONFLICT(gmail_message_id) DO UPDATE SET scanned_at = excluded.scanned_at
+                """,
+                (message_id, now),
+            )
+
+    def set_attachment_result(
+        self,
+        occurrence_id: int,
+        status: AttachmentProcessingStatus,
+        *,
+        problem: str | None = None,
+    ) -> None:
+        """Record a non-parsed terminal attachment outcome."""
+        with closing(self._connect()) as database, database:
+            database.execute(
+                """
+                UPDATE message_attachments
+                SET processing_status = ?, failure_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    problem[:1000] if problem else None,
+                    datetime.now(UTC).isoformat(),
+                    occurrence_id,
+                ),
+            )
+            if status == "failed":
+                database.execute(
+                    """
+                    UPDATE attachment_blobs
+                    SET extraction_status = 'failed', failure_reason = ?, updated_at = ?
+                    WHERE content_sha256 = (
+                        SELECT content_sha256 FROM message_attachments WHERE id = ?
+                    ) AND extraction_status != 'parsed'
+                    """,
+                    (
+                        problem[:1000] if problem else None,
+                        datetime.now(UTC).isoformat(),
+                        occurrence_id,
+                    ),
+                )
+
+    def store_attachment_documents(
+        self,
+        content_sha256: str,
+        documents: list[ExtractedAttachmentDocument],
+    ) -> None:
+        """Persist extracted text and reader metadata independently of the vector index."""
+        stored: list[tuple[ExtractedAttachmentDocument, str]] = []
+        for document in documents:
+            filename = hashlib.sha256(document.document_id.encode("utf-8")).hexdigest() + ".txt"
+            relative_path = Path("extracted") / filename[:2] / filename
+            destination = self.data_dir / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = destination.with_suffix(".tmp")
+            temporary_path.write_text(document.text, encoding="utf-8")
+            temporary_path.replace(destination)
+            stored.append((document, relative_path.as_posix()))
+
+        now = datetime.now(UTC).isoformat()
+        with closing(self._connect()) as database, database:
+            database.execute(
+                "DELETE FROM attachment_documents WHERE content_sha256 = ?",
+                (content_sha256,),
+            )
+            database.executemany(
+                """
+                INSERT INTO attachment_documents (
+                    document_id, content_sha256, ordinal, text_path, metadata
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        document.document_id,
+                        content_sha256,
+                        ordinal,
+                        path,
+                        document.metadata,
+                    )
+                    for ordinal, (document, path) in enumerate(stored)
+                ],
+            )
+            database.execute(
+                """
+                UPDATE attachment_blobs
+                SET extraction_status = 'parsed', failure_reason = NULL, updated_at = ?
+                WHERE content_sha256 = ?
+                """,
+                (now, content_sha256),
+            )
+            database.execute(
+                """
+                UPDATE message_attachments
+                SET processing_status = 'parsed', failure_reason = NULL, updated_at = ?
+                WHERE content_sha256 = ?
+                  AND processing_status IN ('downloaded', 'failed', 'parsed')
+                """,
+                (now, content_sha256),
             )
 
     def _store_body(self, message_id: str, body: str) -> Path:
@@ -282,6 +568,59 @@ class SQLiteArchive:
                 CREATE TABLE IF NOT EXISTS initial_import_state (
                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                     attempted_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS attachment_blobs (
+                    content_sha256 TEXT PRIMARY KEY,
+                    byte_size INTEGER NOT NULL,
+                    storage_path TEXT NOT NULL UNIQUE,
+                    extraction_status TEXT NOT NULL
+                        CHECK (extraction_status IN ('downloaded', 'parsed', 'failed')),
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS message_attachments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    gmail_message_id TEXT NOT NULL REFERENCES messages(gmail_message_id),
+                    part_id TEXT NOT NULL,
+                    gmail_attachment_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    reported_size INTEGER NOT NULL,
+                    inline INTEGER NOT NULL,
+                    source_metadata TEXT NOT NULL,
+                    content_sha256 TEXT REFERENCES attachment_blobs(content_sha256),
+                    processing_status TEXT NOT NULL CHECK (
+                        processing_status IN (
+                            'downloaded', 'parsed', 'skipped', 'unsupported', 'failed'
+                        )
+                    ),
+                    indexing_status TEXT NOT NULL CHECK (
+                        indexing_status IN ('pending', 'indexed', 'failed')
+                    ),
+                    failure_reason TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(gmail_message_id, part_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS attachments_by_content
+                    ON message_attachments(content_sha256);
+
+                CREATE TABLE IF NOT EXISTS attachment_documents (
+                    document_id TEXT PRIMARY KEY,
+                    content_sha256 TEXT NOT NULL
+                        REFERENCES attachment_blobs(content_sha256) ON DELETE CASCADE,
+                    ordinal INTEGER NOT NULL,
+                    text_path TEXT NOT NULL,
+                    metadata TEXT NOT NULL,
+                    UNIQUE(content_sha256, ordinal)
+                );
+
+                CREATE TABLE IF NOT EXISTS attachment_scan_state (
+                    gmail_message_id TEXT PRIMARY KEY REFERENCES messages(gmail_message_id),
+                    scanned_at TEXT NOT NULL
                 );
                 """
             )

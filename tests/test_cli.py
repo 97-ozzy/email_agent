@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from email_agent.cli import run_application
+from email_agent.config import Settings
 from email_agent.gmail import GmailAccessError, GmailStatus
 from email_agent.services import ServiceStatus
 
@@ -125,6 +126,27 @@ def run_with_services(
 
 
 class ConfigurationTests(TestCase):
+    def test_non_positive_attachment_limit_is_rejected(self) -> None:
+        stderr = StringIO()
+
+        exit_code = run_application(
+            environ={**VALID_ENV, "EMAIL_AGENT_ATTACHMENT_MAX_BYTES": "0"},
+            stdin=StringIO(""),
+            stdout=StringIO(),
+            stderr=stderr,
+        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn(
+            "EMAIL_AGENT_ATTACHMENT_MAX_BYTES must be a positive integer",
+            stderr.getvalue(),
+        )
+
+    def test_attachment_limit_defaults_to_20_mebibytes(self) -> None:
+        settings = Settings.from_environ(VALID_ENV)
+
+        self.assertEqual(settings.attachment_max_bytes, 20 * 1024 * 1024)
+
     def test_missing_required_configuration_is_actionable(self) -> None:
         stdout = StringIO()
         stderr = StringIO()

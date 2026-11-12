@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import TestCase
 from unittest.mock import patch
@@ -34,6 +35,34 @@ class ScriptedDiscovery:
     ) -> object:
         self.calls.append((query, max_results, page_token))
         return self.response
+
+
+class AttachmentRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, command: list[str], capture_output: bool) -> CompletedProcess[str]:
+        self.calls.append(command)
+        if command[1] == "attachments":
+            payload = {
+                "message_id": "message-1",
+                "attachments": [
+                    {
+                        "filename": "nested.txt",
+                        "mime_type": "text/plain",
+                        "size": 6,
+                        "part_id": "2.1",
+                        "attachment_id": "gmail-attachment-1",
+                        "inline": False,
+                    }
+                ],
+            }
+        else:
+            directory = Path(command[command.index("--out-dir") + 1])
+            path = directory / "nested.txt"
+            path.write_bytes(b"nested")
+            payload = {"saved": [{"path": str(path)}]}
+        return CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
 
 
 class GmailAgentAuthenticationTests(TestCase):
@@ -247,6 +276,36 @@ class GmailAgentReadOperationsTests(TestCase):
                 (["gmail-agent", "thread", "thread-1", "--json"], True),
             ],
         )
+
+    def test_attachment_occurrences_are_listed_and_downloaded_by_part_id(self) -> None:
+        runner = AttachmentRunner()
+        gmail = GmailAgentAdapter(runner=runner)
+
+        listed = gmail.list_attachments("message-1")
+        content = gmail.download_attachment("message-1", "2.1")
+
+        self.assertEqual(
+            listed,
+            {
+                "message_id": "message-1",
+                "attachments": [
+                    {
+                        "filename": "nested.txt",
+                        "mime_type": "text/plain",
+                        "size": 6,
+                        "part_id": "2.1",
+                        "attachment_id": "gmail-attachment-1",
+                        "inline": False,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(content, b"nested")
+        self.assertEqual(
+            runner.calls[0],
+            ["gmail-agent", "attachments", "message-1", "--json"],
+        )
+        self.assertEqual(runner.calls[1][-2:], ["--name", "2.1"])
 
     def test_api_errors_are_actionable_without_exposing_tokens(self) -> None:
         runner = ScriptedRunner(

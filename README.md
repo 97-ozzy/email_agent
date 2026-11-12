@@ -65,8 +65,10 @@ login without printing credentials, run `uv run --locked gmail-agent status`.
 Startup reports Gmail, Qdrant, and Ollama separately. A Gmail failure does not hide local-service
 status. On the first authenticated run, the application imports the newest 100 unique messages
 from the combined Inbox and Sent scope. Set `EMAIL_AGENT_INITIAL_IMPORT_LIMIT` to a value from 1
-through 100 for a smaller import, and use `EMAIL_AGENT_DATA_DIR` to choose the archive directory
-(default: `data`). Complete message bodies are stored under that directory and metadata plus
+through 100 for a smaller import, use `EMAIL_AGENT_DATA_DIR` to choose the archive directory,
+and set `EMAIL_AGENT_ATTACHMENT_MAX_BYTES` to cap text extraction by attachment byte size
+(default: 20971520). The data directory defaults to `data`. Complete message bodies are stored
+under that directory and metadata plus
 ingestion/indexing state are stored in `archive.sqlite3`. Later starts reuse completed records
 without downloading them again. If an import is partial, the CLI reports actual counts and keeps
 the completed records usable.

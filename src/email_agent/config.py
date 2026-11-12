@@ -28,6 +28,7 @@ class Settings:
     debug: bool = False
     initial_import_limit: int = 100
     data_dir: Path = Path("data")
+    attachment_max_bytes: int = 20 * 1024 * 1024
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Settings:
@@ -66,6 +67,16 @@ class Settings:
         if not data_dir_value:
             problems.append("EMAIL_AGENT_DATA_DIR must not be empty")
 
+        attachment_max_value = environ.get(
+            "EMAIL_AGENT_ATTACHMENT_MAX_BYTES", str(cls.attachment_max_bytes)
+        ).strip()
+        try:
+            attachment_max_bytes = int(attachment_max_value)
+        except ValueError:
+            attachment_max_bytes = 0
+        if attachment_max_bytes < 1:
+            problems.append("EMAIL_AGENT_ATTACHMENT_MAX_BYTES must be a positive integer")
+
         if problems:
             raise ConfigurationError(problems)
 
@@ -78,4 +89,5 @@ class Settings:
             debug=debug_value in {"1", "true", "yes", "on"},
             initial_import_limit=initial_import_limit,
             data_dir=Path(data_dir_value),
+            attachment_max_bytes=attachment_max_bytes,
         )
