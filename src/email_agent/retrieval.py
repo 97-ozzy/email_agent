@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import closing
+from dataclasses import asdict
 from datetime import UTC, datetime, time
 from email.utils import parseaddr
 from uuid import NAMESPACE_URL, uuid5
@@ -14,7 +16,7 @@ import tiktoken
 from llama_index.core import Document, QueryBundle, StorageContext, VectorStoreIndex
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import BaseNode
+from llama_index.core.schema import BaseNode, TextNode
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.embeddings.fastembed import FastEmbedEmbedding
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -98,37 +100,22 @@ class HybridSearchIndex:
     def refresh(self, *, force: bool = False) -> int:
         """Upsert changed documents and replace stale chunks before recording completion."""
         with closing(sqlite3.connect(self.archive.database_path)) as db:
-            db.row_factory = sqlite3.Row
-            rows = db.execute(
-                "SELECT * FROM messages WHERE ingestion_status='downloaded'"
-            ).fetchall()
             state = dict(db.execute("SELECT document_id, fingerprint FROM email_index_state"))
         collection_exists = self.client.collection_exists(self.collection)
         rebuild = not collection_exists
         changed = 0
-        for row in rows:
-            document_id = f"email:{row['gmail_message_id']}"
-            body = (self.settings.data_dir / row["body_path"]).read_text(encoding="utf-8")
-            metadata = {
-                "document_id": document_id,
-                "gmail_message_id": row["gmail_message_id"],
-                "thread_id": row["gmail_thread_id"],
-                "source_type": "email",
-                "title": row["subject"],
-                "timestamp": row["message_timestamp"],
-                "sender": row["sender"],
-                "sender_address": parseaddr(row["sender"])[1].lower(),
-                "location": row["source_reference"],
-            }
+        for document in self._documents():
+            document_id = document.id_
+            metadata = document.metadata
+            text = document.text
             fingerprint = hashlib.sha256(
                 json.dumps(
                     [
-                        body,
-                        row["body_format"],
+                        text,
                         metadata,
                         self.splitter.chunk_size,
                         self.splitter.chunk_overlap,
-                        "clean-v1",
+                        "unified-v1",
                         self.embedding_contract,
                     ],
                     ensure_ascii=False,
@@ -139,41 +126,110 @@ class HybridSearchIndex:
                 continue
             with closing(sqlite3.connect(self.archive.database_path)) as db, db:
                 db.execute("DELETE FROM email_index_state WHERE document_id=?", (document_id,))
-                db.execute(
-                    "UPDATE messages SET indexing_status='pending' WHERE gmail_message_id=?",
-                    (row["gmail_message_id"],),
-                )
-            text = clean_email_body(body, row["body_format"])
-            document = Document(
-                text=text,
-                id_=document_id,
-                metadata=metadata,
-                excluded_embed_metadata_keys=list(metadata),
-                excluded_llm_metadata_keys=list(metadata),
-            )
-            nodes = self.splitter.get_nodes_from_documents([document]) if text else []
-            if collection_exists:
-                self.store.delete(document_id)
-            self.docstore.delete_ref_doc(document_id, raise_error=False)
-            if nodes:
-                self.index.insert_nodes(nodes)
-                self.docstore.add_documents(nodes)
-                collection_exists = True
-            temporary = self.docstore_path.with_suffix(".tmp")
-            self.docstore.persist(str(temporary))
-            temporary.replace(self.docstore_path)
+                self._set_indexing_status(db, document_id, "pending")
+            try:
+                nodes = self.splitter.get_nodes_from_documents([document]) if text else []
+                if collection_exists:
+                    self.store.delete(document_id)
+                self.docstore.delete_ref_doc(document_id, raise_error=False)
+                if nodes:
+                    self.index.insert_nodes(nodes)
+                    self.docstore.add_documents(nodes)
+                    collection_exists = True
+                temporary = self.docstore_path.with_suffix(".tmp")
+                self.docstore.persist(str(temporary))
+                temporary.replace(self.docstore_path)
+            except Exception:
+                with closing(sqlite3.connect(self.archive.database_path)) as db, db:
+                    self._set_indexing_status(db, document_id, "failed")
+                raise
             with closing(sqlite3.connect(self.archive.database_path)) as db, db:
                 db.execute(
                     "INSERT INTO email_index_state VALUES (?, ?) ON CONFLICT(document_id) "
                     "DO UPDATE SET fingerprint=excluded.fingerprint",
                     (document_id, fingerprint),
                 )
-                db.execute(
-                    "UPDATE messages SET indexing_status='indexed' WHERE gmail_message_id=?",
-                    (row["gmail_message_id"],),
-                )
+                self._set_indexing_status(db, document_id, "indexed")
             changed += 1
         return changed
+
+    @staticmethod
+    def _set_indexing_status(db: sqlite3.Connection, document_id: str, status: str) -> None:
+        if document_id.startswith("email:"):
+            db.execute(
+                "UPDATE messages SET indexing_status=? WHERE gmail_message_id=?",
+                (status, document_id.removeprefix("email:")),
+            )
+        else:
+            db.execute(
+                "UPDATE message_attachments SET indexing_status=? WHERE processing_status='parsed' "
+                "AND content_sha256=(SELECT content_sha256 FROM attachment_documents "
+                "WHERE document_id=?)",
+                (status, document_id),
+            )
+
+    def _documents(self) -> Iterator[Document]:
+        with closing(sqlite3.connect(self.archive.database_path)) as db:
+            db.row_factory = sqlite3.Row
+            messages = db.execute(
+                "SELECT * FROM messages WHERE ingestion_status='downloaded'"
+            ).fetchall()
+            attachments = db.execute(
+                "SELECT d.* FROM attachment_documents d JOIN attachment_blobs b "
+                "ON b.content_sha256=d.content_sha256 WHERE b.extraction_status='parsed'"
+            ).fetchall()
+        for row in messages:
+            metadata = {
+                "document_id": f"email:{row['gmail_message_id']}",
+                "gmail_message_id": row["gmail_message_id"],
+                "thread_id": row["gmail_thread_id"],
+                "source_type": "email",
+                "document_type": "email",
+                "title": row["subject"],
+                "timestamp": row["message_timestamp"],
+                "sender": row["sender"],
+                "sender_address": parseaddr(row["sender"])[1].lower(),
+                "location": row["source_reference"],
+            }
+            metadata["sources"] = [dict(metadata)]
+            body = (self.settings.data_dir / row["body_path"]).read_text(encoding="utf-8")
+            yield self._document(clean_email_body(body, row["body_format"]), metadata)
+        for row in attachments:
+            sources = self.archive.attachment_sources(row["document_id"])
+            if not sources:
+                continue
+            reader_metadata = json.loads(row["metadata"])
+            mime = str(reader_metadata.get("source_mime_type", sources[0].mime_type))
+            filename = str(reader_metadata.get("source_filename", sources[0].filename))
+            kind = (
+                "pdf"
+                if mime == "application/pdf" or filename.lower().endswith(".pdf")
+                else "docx"
+                if "wordprocessingml" in mime or filename.lower().endswith(".docx")
+                else "text"
+            )
+            metadata = {
+                "document_id": row["document_id"],
+                "content_sha256": row["content_sha256"],
+                "source_type": "attachment",
+                "document_type": kind,
+                "sources": [
+                    {**asdict(source), "sender_address": parseaddr(source.sender)[1].lower()}
+                    for source in sources
+                ],
+            }
+            text = (self.settings.data_dir / row["text_path"]).read_text(encoding="utf-8")
+            yield self._document(text, metadata)
+
+    @staticmethod
+    def _document(text: str, metadata: dict[str, object]) -> Document:
+        return Document(
+            text=text,
+            id_=str(metadata["document_id"]),
+            metadata=metadata,
+            excluded_embed_metadata_keys=list(metadata),
+            excluded_llm_metadata_keys=list(metadata),
+        )
 
     def search(self, request: SearchRequest) -> list[SearchResult]:
         """Retrieve evidence directly with the integration's built-in fusion."""
@@ -182,15 +238,19 @@ class HybridSearchIndex:
         if not self.client.collection_exists(self.collection):
             return []
         conditions: list[models.FieldCondition] = []
+        start: datetime | None = None
+        end: datetime | None = None
         for key, value in (
             ("sender_address", request.sender),
-            ("source_type", request.source_type),
+            ("filename", request.filename),
         ):
             if value:
                 conditions.append(
                     models.FieldCondition(
                         key=key,
-                        match=models.MatchValue(value=value.lower()),
+                        match=models.MatchValue(
+                            value=value.lower() if key == "sender_address" else value
+                        ),
                     )
                 )
         if request.date_from or request.date_to:
@@ -210,13 +270,26 @@ class HybridSearchIndex:
                     range=models.DatetimeRange(gte=start, lte=end),
                 )
             )
+        filters: list[models.FieldCondition | models.NestedCondition] = []
+        if conditions:
+            filters.append(
+                models.NestedCondition(
+                    nested=models.Nested(key="sources", filter=models.Filter(must=[*conditions]))
+                )
+            )
+        for key, value in (
+            ("source_type", request.source_type),
+            ("document_type", request.document_type),
+        ):
+            if value:
+                filters.append(models.FieldCondition(key=key, match=models.MatchValue(value=value)))
         retriever = self.index.as_retriever(
             vector_store_query_mode="hybrid",
             similarity_top_k=request.limit,
             sparse_top_k=request.limit,
             hybrid_top_k=request.limit,
-            vector_store_kwargs={"qdrant_filters": models.Filter(must=[*conditions])}
-            if conditions
+            vector_store_kwargs={"qdrant_filters": models.Filter(must=[*filters])}
+            if filters
             else {},
         )
         remaining = self.settings.search_context_chars
@@ -232,22 +305,54 @@ class HybridSearchIndex:
                 break
             text = hit.node.get_content()[:remaining]
             tokens = tokenizer.encode(text, disallowed_special=())[:token_budget]
-            text = tokenizer.decode(tokens)
+            text = tokenizer.decode_bytes(tokens).decode("utf-8", errors="ignore")
             token_budget -= len(tokens)
             remaining -= len(text)
             metadata = hit.node.metadata
+            sources = (
+                self.archive.attachment_sources(str(metadata["document_id"]))
+                if metadata["source_type"] == "attachment"
+                else ()
+            )
+            if metadata["source_type"] == "attachment" and not sources:
+                continue
+            # Select the occurrence satisfying this request for the singular citation;
+            # retain every occurrence in sources, resolved from the authoritative archive.
+            matching = [
+                source
+                for source in sources
+                if (not request.filename or source.filename == request.filename)
+                and (
+                    not request.sender
+                    or parseaddr(source.sender)[1].lower() == request.sender.lower()
+                )
+                and (start is None or datetime.fromisoformat(source.timestamp) >= start)
+                and (end is None or datetime.fromisoformat(source.timestamp) <= end)
+            ]
+            source = matching[0] if matching else None
+            if sources and source is None:
+                continue
+            start_char = hit.node.start_char_idx if isinstance(hit.node, TextNode) else None
+            citation = {**asdict(source), "title": source.filename} if source else metadata
             results.append(
                 SearchResult(
                     text=text,
                     score=hit.score or 0.0,
                     document_id=str(metadata["document_id"]),
-                    gmail_message_id=str(metadata["gmail_message_id"]),
-                    thread_id=str(metadata["thread_id"]),
+                    gmail_message_id=str(citation["gmail_message_id"]),
+                    thread_id=str(citation["thread_id"]),
                     source_type=str(metadata["source_type"]),
-                    title=str(metadata["title"]),
-                    timestamp=str(metadata["timestamp"]),
-                    sender=str(metadata["sender"]),
-                    location=str(metadata["location"]),
+                    title=str(citation["title"]),
+                    timestamp=str(citation["timestamp"]),
+                    sender=str(citation["sender"]),
+                    location=str(citation["location"]),
+                    attachment_id=source.attachment_id if source else None,
+                    filename=source.filename if source else None,
+                    mime_type=source.mime_type if source else None,
+                    document_type=str(metadata["document_type"]),
+                    sources=sources,
+                    start_char=start_char,
+                    end_char=(start_char + len(text)) if start_char is not None else None,
                 )
             )
         return results

@@ -12,9 +12,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-AttachmentProcessingStatus = Literal[
-    "downloaded", "parsed", "skipped", "unsupported", "failed"
-]
+from email_agent.search import AttachmentReference
+
+AttachmentProcessingStatus = Literal["downloaded", "parsed", "skipped", "unsupported", "failed"]
 
 
 @dataclass(frozen=True)
@@ -49,8 +49,7 @@ class _MessageMetadata:
         if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
             raise ArchiveError(f"message {message_id} has invalid labels")
         recipients = {
-            field: _optional_text(message.get(field))
-            for field in ("to", "cc", "bcc", "reply_to")
+            field: _optional_text(message.get(field)) for field in ("to", "cc", "bcc", "reply_to")
         }
         return cls(
             message_id=message_id,
@@ -104,6 +103,7 @@ class StoredAttachmentOccurrence:
     content_sha256: str | None
     content_path: Path | None
     processing_status: str
+    indexing_status: str
 
 
 class ArchiveError(ValueError):
@@ -347,7 +347,8 @@ class SQLiteArchive:
                 """
                 SELECT message_attachments.id, message_attachments.content_sha256,
                        attachment_blobs.storage_path,
-                       message_attachments.processing_status
+                       message_attachments.processing_status,
+                       message_attachments.indexing_status
                 FROM message_attachments
                 LEFT JOIN attachment_blobs
                     ON attachment_blobs.content_sha256 = message_attachments.content_sha256
@@ -362,6 +363,7 @@ class SQLiteArchive:
             content_sha256=str(row[1]) if row[1] is not None else None,
             content_path=self.data_dir / str(row[2]) if row[2] is not None else None,
             processing_status=str(row[3]),
+            indexing_status=str(row[4]),
         )
 
     def attachment_content_status(self, content_sha256: str) -> str | None:
@@ -372,6 +374,40 @@ class SQLiteArchive:
                 (content_sha256,),
             ).fetchone()
         return str(row[0]) if row is not None else None
+
+    def attachment_sources(self, document_id: str) -> tuple[AttachmentReference, ...]:
+        """Resolve every archived occurrence through SQLite, never vector payloads."""
+        with closing(self._connect()) as database:
+            database.row_factory = sqlite3.Row
+            rows = database.execute(
+                """
+                SELECT a.id, a.gmail_attachment_id, a.filename, a.mime_type,
+                       m.gmail_message_id, m.gmail_thread_id, m.sender,
+                       m.message_timestamp, m.source_reference, b.storage_path
+                FROM attachment_documents d
+                JOIN attachment_blobs b ON b.content_sha256 = d.content_sha256
+                JOIN message_attachments a ON a.content_sha256 = d.content_sha256
+                JOIN messages m ON m.gmail_message_id = a.gmail_message_id
+                WHERE d.document_id = ? AND m.ingestion_status = 'downloaded'
+                ORDER BY a.id
+                """,
+                (document_id,),
+            ).fetchall()
+        return tuple(
+            AttachmentReference(
+                occurrence_id=row["id"],
+                attachment_id=row["gmail_attachment_id"],
+                gmail_message_id=row["gmail_message_id"],
+                thread_id=row["gmail_thread_id"],
+                filename=row["filename"],
+                mime_type=row["mime_type"],
+                sender=row["sender"],
+                timestamp=row["message_timestamp"],
+                location=row["source_reference"],
+                content_path=str(self.data_dir / row["storage_path"]),
+            )
+            for row in rows
+        )
 
     def mark_attachment_scan_complete(self, message_id: str) -> None:
         """Record that Gmail attachment metadata was successfully enumerated."""
@@ -636,13 +672,9 @@ class SQLiteArchive:
                 );
                 """
             )
-            columns = {
-                str(row[1]) for row in database.execute("PRAGMA table_info(messages)")
-            }
+            columns = {str(row[1]) for row in database.execute("PRAGMA table_info(messages)")}
             if "snippet" not in columns:
-                database.execute(
-                    "ALTER TABLE messages ADD COLUMN snippet TEXT NOT NULL DEFAULT ''"
-                )
+                database.execute("ALTER TABLE messages ADD COLUMN snippet TEXT NOT NULL DEFAULT ''")
 
     def _connect(self) -> sqlite3.Connection:
         database = sqlite3.connect(self.database_path)

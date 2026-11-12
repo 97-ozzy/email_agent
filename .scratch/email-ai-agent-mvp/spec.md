@@ -1415,8 +1415,8 @@ query instruction and contract version. A change selects a fresh derived collect
 document store, even when dimensions match. Legacy collections remain unused and preserved.
 One active collection is shared by email and future attachment nodes. SQLite fingerprints include
 this contract; never reuse incompatible vectors. Rebuild from archived local content without Gmail.
-Current --reindex rebuilds implemented email nodes only; unified attachment rebuilding remains
-Ticket 12 after Ticket 06. Preserve all source files and relationships throughout migration.
+Current --reindex rebuilds email and attachment nodes from persisted local text.
+Ticket 12 retains the broader recovery and rebuild workflow. Preserve all source files and relationships throughout migration.
 
 Mocked embedding tests and local Qdrant tests are distinct from downloaded-model/server-Qdrant
 acceptance. Report the actual tested platforms and runtime versions; do not infer live retrieval

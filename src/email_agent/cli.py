@@ -7,6 +7,7 @@ import os
 import shlex
 import sys
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from datetime import date
 from typing import TextIO
 
@@ -26,12 +27,12 @@ HELP_TEXT = """Supported commands:
   /help    Display supported commands
   /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
   /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
-                [--source email|attachment]
+                [--source email|attachment] [--filename NAME] [--type pdf|docx|text|email]
             Search the persistent local hybrid index
   /gmail-search QUERY  Search live Gmail
   /gmail-message ID    Open one live Gmail message
   /gmail-thread ID     Open one live Gmail conversation
-  /reindex Rebuild email vectors from local content without contacting Gmail
+  /reindex Rebuild email and attachment vectors from local content without contacting Gmail
   /exit    Exit the application
 """
 
@@ -154,7 +155,7 @@ def run_cli(
                 backend = HybridSearchIndex(settings, archive)
                 count = backend.refresh(force=True)
                 search_backend = backend
-                stdout.write(f"Reindexed {count} archived email bodies from local content.\n")
+                stdout.write(f"Reindexed {count} archived documents from local content.\n")
             except Exception as exc:
                 stdout.write(f"Reindex unavailable: {exc}\n")
         elif command.startswith("/search"):
@@ -212,6 +213,8 @@ def _parse_search_request(command: str) -> SearchRequest:
         "--after": "date_from",
         "--before": "date_to",
         "--source": "source_type",
+        "--filename": "filename",
+        "--type": "document_type",
     }
     index = 0
     while index < len(tokens):
@@ -245,6 +248,9 @@ def _parse_search_request(command: str) -> SearchRequest:
     source_type = values.get("source_type")
     if source_type not in {None, "email", "attachment"}:
         raise ValueError("--source must be email or attachment")
+    document_type = values.get("document_type")
+    if document_type not in {None, "pdf", "docx", "text", "email"}:
+        raise ValueError("--type must be pdf, docx, text, or email")
     return SearchRequest(
         query=query,
         limit=limit,
@@ -252,6 +258,8 @@ def _parse_search_request(command: str) -> SearchRequest:
         date_from=values.get("date_from"),
         date_to=values.get("date_to"),
         source_type=source_type,
+        filename=values.get("filename"),
+        document_type=document_type,
     )
 
 
@@ -273,6 +281,21 @@ def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
         )
         if result.location:
             stdout.write(f"location: {result.location}\n")
+        if result.filename is not None:
+            stdout.write(
+                f"attachment_id: {result.attachment_id}\n"
+                f"filename: {result.filename}\n"
+                f"mime_type: {result.mime_type}\n"
+                f"document_type: {result.document_type}\n"
+                f"characters: {result.start_char}:{result.end_char}\n"
+            )
+            if result.page_number is not None:
+                stdout.write(f"page_number: {result.page_number}\n")
+            stdout.write(
+                "sources: "
+                + json.dumps([asdict(source) for source in result.sources], ensure_ascii=False)
+                + "\n"
+            )
 
 
 def _write_import_report(
@@ -389,7 +412,7 @@ def main() -> None:
             settings = Settings.from_environ(os.environ)
             archive = SQLiteArchive(settings.data_dir)
             count = HybridSearchIndex(settings, archive).refresh(force=True)
-            print(f"Reindexed {count} local email bodies; no Gmail access.")
+            print(f"Reindexed {count} local documents; no Gmail access.")
         except Exception as exc:
             print(f"Reindex failed: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc

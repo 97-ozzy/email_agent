@@ -20,6 +20,24 @@ class SearchRequest:
     date_from: str | None = None
     date_to: str | None = None
     source_type: str | None = None
+    filename: str | None = None
+    document_type: str | None = None
+
+
+@dataclass(frozen=True)
+class AttachmentReference:
+    """One authoritative archived occurrence of a shared attachment document."""
+
+    occurrence_id: int
+    attachment_id: str
+    gmail_message_id: str
+    thread_id: str
+    filename: str
+    mime_type: str
+    sender: str
+    timestamp: str
+    location: str
+    content_path: str
 
 
 @dataclass(frozen=True)
@@ -36,6 +54,14 @@ class SearchResult:
     timestamp: str
     sender: str
     location: str | None = None
+    attachment_id: str | None = None
+    filename: str | None = None
+    mime_type: str | None = None
+    document_type: str | None = None
+    sources: tuple[AttachmentReference, ...] = ()
+    start_char: int | None = None
+    end_char: int | None = None
+    page_number: int | None = None
 
 
 class SearchBackend(Protocol):

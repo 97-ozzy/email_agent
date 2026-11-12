@@ -104,7 +104,8 @@ read-only authorization before Gmail becomes available.
 
 ### Local email search
 
-Run `/search QUERY` to index archived email bodies and retrieve passages using FastEmbed `Qwen/Qwen3-Embedding-0.6B`
+Run `/search QUERY` to index archived email bodies and extracted PDF, DOCX, and text attachments
+and retrieve passages using FastEmbed `Qwen/Qwen3-Embedding-0.6B`
 and FastEmbed BM25 with LlamaIndex's built-in relative-score fusion. Qdrant must be
 running. The first BM25 use downloads its small tokenizer resources.
 
@@ -117,7 +118,15 @@ additional character ceiling is available through `EMAIL_AGENT_SEARCH_CONTEXT_CH
 Index processing state and the LlamaIndex document store persist beneath the data directory;
 Qdrant uses the existing Compose volume. Changed sources replace old chunks. Original archived
 bodies remain intact. Search returns evidence directly without calling a generative model.
-Attachment indexing is covered by a later ticket.
+Use `--source attachment`, `--filename "invoice.pdf"` (exact, case-sensitive original name),
+or `--type pdf|docx|text|email` to narrow results. Combined filename, sender, and date filters
+must match the same attachment occurrence. Identical bytes share one document; each result
+includes all archived message occurrences resolved from SQLite, including filenames, MIME
+types, Gmail attachment IDs, and paths to the retained files. The singular citation selects
+an occurrence matching the filters. Character ranges refer to persisted extracted text.
+PDF page numbers are omitted because the current full-document parser does not preserve
+trustworthy page boundaries. Reindexing reuses extracted text without downloading or parsing
+attachments again.
 
 ### Running checks
 
@@ -141,7 +150,7 @@ Status means CPU/runtime and model registry support, not downloaded weights or t
 New embedding contracts use `email_agent_sources_<contract-hash>` and
 `data/index/<contract-hash>/docstore.json`. The legacy collection is preserved but never queried.
 Even equal-dimension model changes rebuild vectors from local bodies. Run
-`email-agent --reindex` to force a local email rebuild without Gmail access.
+`email-agent --reindex` to force a local email and attachment rebuild without Gmail access.
 Attachments and their extracted text remain preserved; indexing/rebuilding them is still
 assigned to Tickets 06/12. No unrelated future ticket is implemented here.
 See [compatibility evidence](docs/qwen-fastembed-compatibility.md) for real versus mocked checks.

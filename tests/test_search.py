@@ -7,6 +7,13 @@ from unittest import TestCase
 
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from qdrant_client import QdrantClient
+from test_attachments import (
+    AttachmentGmail,
+    attachment,
+    docx_with_text,
+    pdf_with_text,
+    run_import,
+)
 
 from email_agent.archive import SQLiteArchive
 from email_agent.cli import run_application
@@ -75,6 +82,13 @@ class ControlledEmbedding(BaseEmbedding):
 
     def _get_text_embedding(self, text: str) -> list[float]:
         return self.vector(text)
+
+
+class UnavailableAttachmentEmbedding(ControlledEmbedding):
+    def _get_text_embedding(self, text: str) -> list[float]:
+        if "ATTACHFAIL" in text:
+            raise RuntimeError("embedding unavailable")
+        return super()._get_text_embedding(text)
 
 
 class EmailBodyCleaningTests(TestCase):
@@ -250,6 +264,64 @@ class SearchCliTests(TestCase):
         self.assertEqual(search.requests, [])
         self.assertIn("--limit must be between 1 and 20", output)
 
+    def test_attachment_filters_and_all_source_citations_are_exposed(self) -> None:
+        from email_agent.search import AttachmentReference
+
+        source = AttachmentReference(
+            1,
+            "gmail-attachment",
+            "message",
+            "thread",
+            "report.pdf",
+            "application/pdf",
+            "Alice",
+            "2026-11-12",
+            "gmail-link",
+            "local.pdf",
+        )
+        search = ControlledSearch(
+            [
+                SearchResult(
+                    "Invoice PDF-42",
+                    0.75,
+                    "attachment:stable",
+                    "message",
+                    "thread",
+                    "attachment",
+                    "report.pdf",
+                    "2026-11-12",
+                    "Alice",
+                    attachment_id="gmail-attachment",
+                    filename="report.pdf",
+                    mime_type="application/pdf",
+                    document_type="pdf",
+                    sources=(source,),
+                    start_char=0,
+                    end_char=14,
+                )
+            ]
+        )
+        output = self.run_search(
+            '/search PDF-42 --filename "report.pdf" --type pdf --source attachment', search
+        )
+        self.assertEqual(
+            search.requests[0],
+            SearchRequest(
+                "PDF-42", filename="report.pdf", document_type="pdf", source_type="attachment"
+            ),
+        )
+        for value in (
+            "attachment:stable",
+            "gmail-attachment",
+            "report.pdf",
+            "application/pdf",
+            "characters: 0:14",
+            '"occurrence_id": 1',
+            '"content_path": "local.pdf"',
+        ):
+            self.assertIn(value, output)
+        self.assertNotIn("page_number:", output)
+
 
 class HybridRetrievalTests(TestCase):
     def make_index(
@@ -403,3 +475,233 @@ class HybridRetrievalTests(TestCase):
             tokenizer = tiktoken.get_encoding("cl100k_base")
             self.assertLessEqual(sum(len(tokenizer.encode(r.text)) for r in results), 5)
             self.assertEqual(results[0].document_id, "email:budget")
+
+    def test_supported_attachments_share_hybrid_search_without_mixing_documents(self) -> None:
+        with TemporaryDirectory() as directory:
+            contents = {
+                "pdf": pdf_with_text("Invoice PDF-429 total 429 EUR"),
+                "docx": docx_with_text("Invoice DOCX-731 total 731 EUR"),
+                "text": b"Invoice TEXT-915 total 915 EUR",
+            }
+            types = {
+                "pdf": "application/pdf",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "text": "text/plain",
+            }
+            gmail = AttachmentGmail(
+                [
+                    attachment(kind, f"invoice.{kind}", types[kind], data)
+                    for kind, data in contents.items()
+                ],
+                contents,
+            )
+            run_import(directory, gmail)
+            archive = SQLiteArchive(Path(directory))
+            archive.store_message(archived_message("body", "Invoice BODY-212 total 212 EUR"))
+            index = self.make_index(directory, archive)
+            self.assertEqual(index.refresh(), 5)
+            results = index.search(SearchRequest("Invoice", limit=10))
+            self.assertEqual({r.source_type for r in results}, {"email", "attachment"})
+            for kind, fact in (("pdf", "PDF-429"), ("docx", "DOCX-731"), ("text", "TEXT-915")):
+                with self.subTest(kind=kind):
+                    hits = index.search(SearchRequest(fact, filename=f"invoice.{kind}"))
+                    self.assertEqual(len(hits), 1)
+                    hit = hits[0]
+                    self.assertIn(fact, hit.text)
+                    self.assertEqual(hit.document_type, kind)
+                    self.assertEqual(hit.attachment_id, f"gmail-{kind}")
+                    self.assertEqual(hit.mime_type, types[kind])
+                    self.assertEqual(hit.gmail_message_id, "message-1")
+                    self.assertEqual(hit.thread_id, "thread-1")
+                    self.assertEqual(
+                        hit.document_id,
+                        index.search(SearchRequest(fact, document_type=kind))[0].document_id,
+                    )
+                    self.assertEqual(len(hit.sources), 1)
+                    self.assertTrue(Path(hit.sources[0].content_path).is_file())
+                    self.assertIsNotNone(hit.start_char)
+                    self.assertIsNotNone(hit.end_char)
+                    self.assertIsNone(hit.page_number)
+                    for other in ("PDF-429", "DOCX-731", "TEXT-915", "BODY-212"):
+                        if other != fact:
+                            self.assertNotIn(other, hit.text)
+            self.assertEqual(index.refresh(), 0)
+            self.assertEqual(index.client.count(index.collection, exact=True).count, 5)
+
+    def test_shared_attachment_sources_filter_together_and_survive_restart(self) -> None:
+        with TemporaryDirectory() as directory:
+            data = b"Invoice SHARED-42 payable on Friday"
+            gmail = AttachmentGmail(
+                [attachment("a", "alice.txt", "text/plain", data)],
+                {"a": data},
+                message_ids=("alice",),
+            )
+            run_import(directory, gmail)
+            archive = SQLiteArchive(Path(directory))
+            archive.store_message(
+                archived_message(
+                    "bob",
+                    "Another copy",
+                    sender="Bob <bob@example.com>",
+                    timestamp="2026-10-10T10:30:00+00:00",
+                )
+            )
+            from email_agent.attachments import process_message_attachments
+
+            second = AttachmentGmail([attachment("b", "bob.txt", "text/plain", data)], {"b": data})
+            process_message_attachments(second, archive, "bob", 1000)
+            path = str(Path(directory) / "qdrant")
+            client = QdrantClient(path=path)
+            index = self.make_index(directory, archive, client=client)
+            self.assertEqual(index.refresh(), 3)
+            hit = index.search(
+                SearchRequest(
+                    "SHARED-42", filename="bob.txt", sender="bob@example.com", date_to="2026-10-31"
+                )
+            )[0]
+            self.assertEqual(hit.gmail_message_id, "bob")
+            self.assertEqual(hit.filename, "bob.txt")
+            self.assertEqual({s.gmail_message_id for s in hit.sources}, {"alice", "bob"})
+            self.assertEqual({s.attachment_id for s in hit.sources}, {"gmail-a", "gmail-b"})
+            self.assertEqual(
+                index.search(
+                    SearchRequest("SHARED-42", filename="bob.txt", sender="alice@example.com")
+                ),
+                [],
+            )
+            self.assertEqual(
+                index.search(
+                    SearchRequest("SHARED-42", filename="alice.txt", date_to="2026-10-31")
+                ),
+                [],
+            )
+            stable_id = hit.document_id
+            stable_sources = hit.sources
+            client.close()
+            occurrence = archive.attachment_occurrence("bob", "b")
+            assert occurrence is not None
+            self.assertEqual(occurrence.indexing_status, "indexed")
+            client = QdrantClient(path=path)
+            try:
+                index = self.make_index(directory, archive, client=client)
+                self.assertEqual(index.refresh(), 0)
+                hit = index.search(SearchRequest("SHARED-42", source_type="attachment"))[0]
+                self.assertEqual(hit.document_id, stable_id)
+                self.assertEqual(hit.sources, stable_sources)
+                self.assertEqual(index.refresh(force=True), 3)
+                self.assertEqual(client.count(index.collection, exact=True).count, 3)
+            finally:
+                client.close()
+
+    def test_distinct_content_with_same_filename_has_separate_documents_and_chunks(self) -> None:
+        with TemporaryDirectory() as directory:
+            data = {"a": b"Invoice ORIGINAL-71. " * 700, "b": b"Invoice REVISED-82. " * 700}
+            gmail = AttachmentGmail(
+                [attachment(k, "contract.txt", "text/plain", v) for k, v in data.items()], data
+            )
+            run_import(directory, gmail)
+            archive = SQLiteArchive(Path(directory))
+            index = self.make_index(directory, archive, context_budget=50_000)
+            index.refresh()
+            results = index.search(SearchRequest("Invoice", filename="contract.txt", limit=20))
+            self.assertEqual(len({r.document_id for r in results}), 2)
+            self.assertGreater(len(results), 2)
+            for result in results:
+                fact = "ORIGINAL-71" if result.attachment_id == "gmail-a" else "REVISED-82"
+                other = "REVISED-82" if fact == "ORIGINAL-71" else "ORIGINAL-71"
+                self.assertIn(fact, result.text)
+                self.assertNotIn(other, result.text)
+                original = data["a" if fact == "ORIGINAL-71" else "b"].decode()
+                self.assertEqual(result.text, original[result.start_char : result.end_char])
+
+    def test_truncated_unicode_passage_still_matches_its_character_location(self) -> None:
+        with TemporaryDirectory() as directory:
+            text = "A🚀 invoice total 42 EUR"
+            data = text.encode()
+            run_import(
+                directory,
+                AttachmentGmail([attachment("a", "unicode.txt", "text/plain", data)], {"a": data}),
+            )
+            archive = SQLiteArchive(Path(directory))
+            index = HybridSearchIndex(
+                Settings("key", "model", data_dir=Path(directory), search_context_tokens=2),
+                archive,
+                client=QdrantClient(":memory:"),
+                embed_model=ControlledEmbedding(),
+            )
+            index.refresh()
+            result = index.search(SearchRequest("invoice", source_type="attachment"))[0]
+            self.assertEqual(result.text, text[result.start_char : result.end_char])
+
+    def test_new_embedding_contract_rebuilds_attachments_from_persisted_text(self) -> None:
+        from email_agent.attachments import process_message_attachments
+
+        with TemporaryDirectory() as directory:
+            data = b"Invoice MIGRATE-317 is payable in May"
+            gmail = AttachmentGmail(
+                [attachment("a", "invoice.txt", "text/plain", data)], {"a": data}
+            )
+            run_import(directory, gmail)
+            archive = SQLiteArchive(Path(directory))
+            first = self.make_index(directory, archive)
+            first.refresh()
+            original = first.search(SearchRequest("MIGRATE-317", source_type="attachment"))[0]
+            archive.store_message(archived_message("forward", "Forwarded invoice"))
+            process_message_attachments(gmail, archive, "forward", 1000)
+            # Even before refreshing vector payloads, citations come from current SQLite links.
+            refreshed = first.search(SearchRequest("MIGRATE-317", source_type="attachment"))[0]
+            self.assertEqual(
+                {s.gmail_message_id for s in refreshed.sources}, {"message-1", "forward"}
+            )
+            downloads = list(gmail.downloaded_parts)
+            source_files = {
+                s.content_path: Path(s.content_path).read_bytes() for s in refreshed.sources
+            }
+            migrated = HybridSearchIndex(
+                Settings(
+                    "key", "model", data_dir=Path(directory), embedding_model="test-new-contract"
+                ),
+                archive,
+                client=first.client,
+                embed_model=ControlledEmbedding(),
+            )
+            self.assertNotEqual(first.collection, migrated.collection)
+            self.assertEqual(migrated.refresh(), 3)
+            hit = migrated.search(SearchRequest("MIGRATE-317", source_type="attachment"))[0]
+            self.assertEqual(hit.document_id, original.document_id)
+            self.assertEqual(hit.sources, refreshed.sources)
+            self.assertIn("MIGRATE-317", hit.text)
+            self.assertEqual(gmail.downloaded_parts, downloads)
+            for path, content in source_files.items():
+                self.assertEqual(Path(path).read_bytes(), content)
+            self.assertTrue(first.client.collection_exists(first.collection))
+
+    def test_failed_attachment_indexing_is_observable_and_retried(self) -> None:
+        with TemporaryDirectory() as directory:
+            data = b"Invoice ATTACHFAIL-99"
+            run_import(
+                directory,
+                AttachmentGmail([attachment("a", "invoice.txt", "text/plain", data)], {"a": data}),
+            )
+            archive = SQLiteArchive(Path(directory))
+            settings = Settings("key", "model", data_dir=Path(directory))
+            client = QdrantClient(":memory:")
+            index = HybridSearchIndex(
+                settings, archive, client=client, embed_model=UnavailableAttachmentEmbedding()
+            )
+            with self.assertRaisesRegex(RuntimeError, "embedding unavailable"):
+                index.refresh()
+            occurrence = archive.attachment_occurrence("message-1", "a")
+            assert occurrence is not None
+            self.assertEqual(occurrence.indexing_status, "failed")
+            index = HybridSearchIndex(
+                settings, archive, client=client, embed_model=ControlledEmbedding()
+            )
+            self.assertEqual(index.refresh(), 1)
+            occurrence = archive.attachment_occurrence("message-1", "a")
+            assert occurrence is not None
+            self.assertEqual(occurrence.indexing_status, "indexed")
+            self.assertIn(
+                "ATTACHFAIL-99",
+                index.search(SearchRequest("ATTACHFAIL-99", source_type="attachment"))[0].text,
+            )
