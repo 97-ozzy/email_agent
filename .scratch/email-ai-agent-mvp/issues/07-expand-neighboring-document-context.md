@@ -14,4 +14,8 @@
 - [ ] Context expansion reads the local document store and does not perform a new vector search, regenerate embeddings, or call a generative model.
 - [ ] Unknown documents and chunks return clear structured errors.
 - [ ] Tests verify ordering, boundaries, size limits, persistence, unknown identifiers, and strict source isolation.
+- [ ] Nodes are persisted locally with LlamaIndex `SimpleDocumentStore`, including stable IDs and previous/next relationships, and reload successfully after a process restart.
+- [ ] Initial retrieval context expansion uses LlamaIndex `PrevNextNodePostprocessor`; the dedicated tool resolves its target from the document store and uses the same bounded previous/next semantics without issuing a vector query.
+- [ ] The document store is a rebuildable derived representation; SQLite, original local source files, and persisted extracted text remain authoritative.
+- [ ] Before implementation, the installed-version persistence/reload behavior, relationship serialization, deterministic node-ID behavior, and `PrevNextNodePostprocessor` interface are verified and captured in implementation notes or tests.
 

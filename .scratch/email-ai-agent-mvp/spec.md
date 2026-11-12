@@ -374,11 +374,11 @@ The agreed components are:
 | Gmail integration | `dremok/gmail-agent` |
 | Gmail transport | MCP over stdio |
 | RAG framework | LlamaIndex |
-| Vector database | Qdrant |
-| Embedding runtime | Ollama |
+| Vector database | Qdrant through LlamaIndex `QdrantVectorStore` |
+| Embedding runtime | LlamaIndex `OllamaEmbedding` |
 | Embedding model | `bge-m3` |
-| Sparse retrieval | BM25 |
-| Retrieval fusion | Reciprocal Rank Fusion |
+| Sparse retrieval | FastEmbed BM25 |
+| Retrieval fusion | Qdrant/LlamaIndex Reciprocal Rank Fusion |
 | Relational metadata | SQLite |
 | Local source storage | Configurable local directory |
 | Document processing | LlamaIndex readers |
@@ -453,7 +453,7 @@ Responsibilities:
 - Sparse indexing.
 - Hybrid retrieval.
 - Metadata filtering.
-- Result fusion.
+- Configuring framework-provided result fusion.
 - Bounded context expansion.
 - Structured retrieval results.
 
@@ -468,6 +468,12 @@ Responsibilities:
 - Processing statuses.
 - Source references.
 - Persistent document-store state.
+
+The external seam of the retrieval module should remain small: callers provide a query,
+filters, and a result limit and receive attributable evidence. Dense embedding, sparse
+encoding, fusion, vector-store access, and node-context expansion remain implementation
+details delegated to LlamaIndex, Qdrant, Ollama, and FastEmbed rather than separate custom
+interfaces.
 
 **Synchronization module**
 
@@ -529,7 +535,11 @@ The CLI should be usable after a partially successful import, with an explicit w
 
 ### 5. Local Data Model
 
-SQLite is the source of truth for ingestion metadata and processing status.
+SQLite and the local source archive are the source of truth. SQLite owns message metadata,
+document and message-attachment relationships, and ingestion, extraction, and indexing
+status. The local archive owns original email content, content-addressed attachment bytes,
+and persisted extracted text. Qdrant and the LlamaIndex document store contain rebuildable
+derived representations and must not become the only copy of source content or relationships.
 
 The storage model must represent at least:
 
@@ -548,15 +558,27 @@ The storage model must represent at least:
 
 **Attachment**
 
-- Stable internal attachment ID.
-- Related Gmail message ID.
-- Original filename.
-- MIME type.
+- Stable internal attachment ID derived from the content identity.
 - File size.
 - SHA-256 content hash.
 - Local storage reference.
 - Text extraction status.
 - Indexing status.
+
+**Message-attachment relationship**
+
+- Stable relationship ID.
+- Related Gmail message ID.
+- Gmail attachment or MIME-part identity.
+- Related stable internal attachment ID.
+- Original filename.
+- MIME type.
+- Other occurrence-specific source metadata.
+
+Attachment bytes and extracted text are stored once under their SHA-256 content identity. A
+separate message-attachment relationship records every Gmail message occurrence that refers
+to those bytes. Consequently, identical content can be shared by multiple messages without
+merging distinct relationships, and different content with the same filename remains distinct.
 
 **Document**
 
@@ -567,6 +589,10 @@ The storage model must represent at least:
 - Extracted text reference.
 - Parsing metadata.
 - Indexing status.
+
+Persist extracted text in the local archive. Reindexing must be able to recreate LlamaIndex
+documents, nodes, and Qdrant points from SQLite and local files without Gmail access or
+re-running attachment downloads.
 
 **Chunk**
 
@@ -585,6 +611,11 @@ Processing status should be committed only after the corresponding operation has
 
 Attachments with identical content must reuse stored bytes while preserving separate email-attachment relationships.
 
+Document and node identifiers must be stable and deterministic for unchanged source content
+and chunking configuration. Reprocessing uses those identifiers to upsert or replace derived
+records rather than append duplicates. The exact identifier construction must be verified
+against the installed LlamaIndex interfaces before implementation and recorded in code/tests.
+
 ### 6. Attachment Processing
 
 Supported textual extraction formats for the MVP:
@@ -593,7 +624,8 @@ Supported textual extraction formats for the MVP:
 - DOCX.
 - TXT and ordinary text files.
 
-Use existing LlamaIndex readers wherever suitable.
+Use existing LlamaIndex readers for PDF, DOCX, and TXT extraction. Select the concrete
+readers only after verifying their installed-version interfaces and output metadata.
 
 No custom document parser should be written if a supported reader already provides the required functionality.
 
@@ -613,13 +645,18 @@ An unreadable file must not prevent the remaining messages or attachments from b
 
 Use LlamaIndex `SentenceSplitter`.
 
-Initial parameters:
+Required parameters:
 
-- Target chunk size: approximately 512 tokens.
-- Chunk overlap: approximately 64 tokens.
+- `chunk_size=512`.
+- `chunk_overlap=64`.
 - Short messages should remain a single chunk when appropriate.
 
-Different emails and attachments must not be combined into the same logical document.
+Represent each email body and each supported SHA-256-deduplicated attachment content item as
+a separate LlamaIndex `Document`. Repeated occurrences of the same attachment bytes reuse that
+attachment document and resolve through SQLite to every message-attachment relationship.
+Assign the stable document identifier explicitly and carry source metadata needed for filtering,
+attribution, and relationship lookup. Different emails and distinct attachment content items
+must not be combined into the same logical document.
 
 Email HTML should be converted to readable text.
 
@@ -635,7 +672,19 @@ The retrieval system combines:
 - BM25-based sparse/lexical search.
 - Reciprocal Rank Fusion for combining results.
 
-Use the existing LlamaIndex and Qdrant integration for hybrid retrieval.
+Use LlamaIndex `QdrantVectorStore` with hybrid retrieval enabled. Dense vectors are produced
+by `OllamaEmbedding` using `bge-m3`; sparse vectors are produced by FastEmbed BM25. Use the
+Qdrant/LlamaIndex Reciprocal Rank Fusion path supplied by the installed integration. Do not
+implement tokenization, BM25 scoring, rank fusion, or vector search in application code.
+
+Build a LlamaIndex `VectorStoreIndex` over one Qdrant collection containing both email and
+attachment nodes. Distinguish sources through payload metadata and use `as_retriever()` for
+evidence retrieval. Do not use a query engine or response synthesizer in this path.
+
+Translate supported filters to the installed integration's metadata-filter interface. SQLite
+remains authoritative for source relationships; every returned attachment node must resolve
+to all of its archived message relationships even if the vector payload also carries denormalized
+metadata for filtering.
 
 The retrieval component does not call a generative LLM.
 
@@ -684,12 +733,14 @@ If results exceed the budget, reduce returned context without dropping source id
 
 ### 10. Large Document Context
 
-Use LlamaIndex's persistent document-store capabilities and neighboring-node relationships.
+Persist document nodes with LlamaIndex `SimpleDocumentStore`, including stable node IDs and
+previous/next relationships created during deterministic parsing. Its persistence location is
+local and survives application restarts; it is a rebuildable derivative of the local archive.
 
 The agreed approach is:
 
 - `SimpleDocumentStore` for stored document nodes.
-- `PrevNextNodePostprocessor` for adjacent-chunk expansion.
+- `PrevNextNodePostprocessor` for bounded adjacent-chunk expansion from retrieved nodes.
 - A dedicated `get_local_document` tool for retrieving selected document fragments.
 
 The tool should support:
@@ -700,7 +751,9 @@ The tool should support:
 
 Context expansion must respect a bounded output size.
 
-Retrieving adjacent chunks should not require a new vector search or generative LLM call.
+The dedicated tool resolves the requested stable node from the document store and applies the
+same bounded previous/next expansion semantics without a new vector search. Retrieving adjacent
+chunks must not regenerate embeddings or call a generative LLM.
 
 `AutoMergingRetriever` and `RecursiveRetriever` are excluded from the initial implementation.
 
@@ -841,6 +894,11 @@ Pending or failed documents should be eligible for retry during synchronization 
 
 Repeated processing must not create duplicate document records or duplicated vector entries.
 
+Index writes must use stable document/node identities and idempotent Qdrant point updates.
+If source content or chunking configuration changes, stale derived nodes and vector points are
+removed or replaced explicitly. Neither a retry nor a complete reindex may append another copy
+of an unchanged document.
+
 The local metadata database should provide enough state to identify incomplete work.
 
 ### 18. Model Configuration
@@ -865,7 +923,8 @@ Changing the embedding model requires reindexing.
 
 Provide a dedicated reindex operation.
 
-Reindexing must rebuild the retrieval data from locally stored messages, extracted documents, and attachments.
+Reindexing must rebuild the Qdrant collection and persistent LlamaIndex document store from
+SQLite, locally stored messages, persisted extracted text, and archived attachments.
 
 It must not redownload Gmail data.
 
@@ -1282,6 +1341,19 @@ Before implementing, Codex should verify the currently installed versions and pu
 - Qdrant's dense and sparse configuration.
 - Ollama's `bge-m3` embedding support.
 - LlamaIndex's document-store persistence and neighboring-node relationships.
+- FastEmbed BM25 behavior for Russian-language text, including the tokenizer actually used by
+  the installed version.
+- Qdrant/LlamaIndex metadata filtering for sender, dates, source type, filename, and any
+  multi-valued source-message metadata.
+- `SimpleDocumentStore` persistence and reload behavior across process restarts.
+- Deterministic LlamaIndex document/node ID assignment, previous/next relationship persistence,
+  and idempotent Qdrant point updates.
+
+These checks are an implementation gate for Tickets 04-07. Record the installed package
+versions and the verified interfaces in implementation notes or tests before writing the RAG
+components. If Russian BM25 tokenization is inadequate or an interface is unavailable, stop
+and update the specification rather than silently introducing custom parsing, sparse ranking,
+fusion, or vector-search code.
 
 Where a documented interface differs from this specification, prefer adapting the integration to the actual library API without changing the agreed user-visible behavior.
 
