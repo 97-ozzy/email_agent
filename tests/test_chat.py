@@ -425,6 +425,18 @@ class ChatConfigurationTests(TestCase):
         from pydantic_ai.models.openrouter import OpenRouterModel
 
         def response(url: str, **kwargs: object) -> httpx.Response:
+            if url.endswith("/endpoints"):
+                return httpx.Response(
+                    200,
+                    request=httpx.Request("GET", url),
+                    json={
+                        "data": {
+                            "endpoints": [
+                                {"status": 0, "supported_parameters": ["tools", "tool_choice"]}
+                            ]
+                        },
+                    },
+                )
             return httpx.Response(
                 200,
                 request=httpx.Request("GET", url),

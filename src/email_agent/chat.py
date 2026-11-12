@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -10,6 +12,7 @@ from typing import Annotated, Protocol, runtime_checkable
 import httpx
 from pydantic import Field
 from pydantic_ai import Agent, RunContext, UsageLimitExceeded, UsageLimits
+from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -60,6 +63,24 @@ class ChatError(RuntimeError):
     """A safe, user-facing chat diagnostic."""
 
 
+def _openrouter_error(status: int, body: object, api_key: str) -> str:
+    """Expose useful provider diagnostics without headers or raw request dumps."""
+    if isinstance(body, dict):
+        error = body.get("error", body)
+        if isinstance(error, dict):
+            detail = {key: error[key] for key in ("message", "code") if key in error}
+            metadata = error.get("metadata")
+            if isinstance(metadata, dict) and "failed_routing_step" in metadata:
+                detail["metadata"] = {"failed_routing_step": metadata["failed_routing_step"]}
+            body = detail
+    text = json.dumps(body, ensure_ascii=True, default=str)
+    if api_key:
+        text = text.replace(api_key, "<REDACTED>")
+    text = re.sub(r"sk-[A-Za-z0-9_-]+", "<REDACTED>", text)
+    text = re.sub(r"(?i)Bearer\s+[^\s\"\\]+", "Bearer <REDACTED>", text)
+    return f"OpenRouter HTTP {status}: {text[:2000]}"
+
+
 def openrouter_model(settings: Settings) -> Model:
     """Check advertised tool support before sending any correspondence to the model."""
     if not settings.openrouter_api_key.strip():
@@ -81,6 +102,30 @@ def openrouter_model(settings: Settings) -> Model:
         selected = next((m for m in models if m["id"] == settings.openrouter_model), None)
         if selected is None or "tools" not in (selected.get("supported_parameters") or []):
             raise ChatError("OPENROUTER_MODEL must name an available model supporting tools.")
+        endpoints_response = httpx.get(
+            f"https://openrouter.ai/api/v1/models/{settings.openrouter_model}/endpoints",
+            timeout=15,
+        )
+        endpoints_response.raise_for_status()
+        endpoints = endpoints_response.json()["data"]["endpoints"]
+        if not any(
+            endpoint.get("status") == 0
+            and {"tools", "tool_choice"}.issubset(endpoint.get("supported_parameters") or [])
+            for endpoint in endpoints
+        ):
+            raise ChatError("OPENROUTER_MODEL has no available endpoint supporting tool calling.")
+    except httpx.HTTPStatusError as exc:
+        try:
+            body = exc.response.json()
+        except ValueError:
+            body = exc.response.text
+        raise ChatError(
+            _openrouter_error(
+                exc.response.status_code,
+                body,
+                settings.openrouter_api_key,
+            )
+        ) from None
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         raise ChatError(
             "Cannot verify OpenRouter tool support; check connectivity and retry."
@@ -132,7 +177,6 @@ class ChatSession:
         self.notify = notify
         self._exchanges: deque[list[ModelMessage]] = deque(maxlen=10)
         model_settings: OpenRouterModelSettings = {
-            "parallel_tool_calls": False,
             "openrouter_provider": {"require_parameters": True},
         }
         self.agent: Agent[Investigation, str] = Agent(
@@ -224,6 +268,14 @@ class ChatSession:
         except Exception as exc:
             if isinstance(exc, UsageLimitExceeded) or investigation.calls >= investigation.limit:
                 return self._partial_answer(question, investigation)
+            if isinstance(exc, ModelHTTPError):
+                raise ChatError(
+                    _openrouter_error(
+                        exc.status_code,
+                        exc.body,
+                        self.settings.openrouter_api_key,
+                    )
+                ) from None
             raise ChatError(
                 "Chat unavailable. Check OpenRouter credentials, tool support, and connectivity."
             ) from exc
