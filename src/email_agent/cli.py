@@ -10,8 +10,10 @@ from typing import TextIO
 
 from dotenv import load_dotenv
 
+from email_agent.archive import ArchiveState, SQLiteArchive
 from email_agent.config import ConfigurationError, Settings
 from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
+from email_agent.ingestion import ImportReport, import_recent_messages
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
 
 load_dotenv()
@@ -75,6 +77,18 @@ def run_cli(
         settings.embedding_model,
         local_problem=local_problem,
     )
+    if gmail_status.available:
+        archive = SQLiteArchive(settings.data_dir)
+        archive_state = archive.state()
+        if archive_state.exists:
+            _write_archive_reuse(stdout, archive_state)
+        else:
+            report = import_recent_messages(
+                gmail,
+                archive,
+                settings.initial_import_limit,
+            )
+            _write_import_report(stdout, report)
     if status.ollama_available and not status.embedding_model_available:
         _offer_model_download(settings, services, stdin, stdout)
 
@@ -133,6 +147,34 @@ def run_cli(
             stdout.write(
                 "Chat is not configured in this bootstrap ticket. Type /help for commands.\n"
             )
+
+
+def _write_import_report(stdout: TextIO, report: ImportReport) -> None:
+    stdout.write(
+        "Initial import: "
+        f"requested {report.requested}, downloaded {report.downloaded}, "
+        f"processed {report.processed}, failed {report.failed}"
+    )
+    if report.reused:
+        stdout.write(f", reused {report.reused}")
+    stdout.write(".\n")
+    if report.failed:
+        _write_incomplete_archive_warning(stdout)
+
+
+def _write_archive_reuse(stdout: TextIO, state: ArchiveState) -> None:
+    stdout.write(
+        f"Local archive: reused {state.completed} completed messages, "
+        f"failed {state.failed}.\n"
+    )
+    if state.failed:
+        _write_incomplete_archive_warning(stdout)
+
+
+def _write_incomplete_archive_warning(stdout: TextIO) -> None:
+    stdout.write(
+        "Warning: the local archive is incomplete; completed messages remain usable.\n"
+    )
 
 
 def _try_write_gmail_result(

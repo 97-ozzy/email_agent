@@ -21,6 +21,21 @@ class ScriptedRunner:
         return CompletedProcess(command, return_code, stdout=stdout, stderr="")
 
 
+class ScriptedDiscovery:
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[tuple[str, int, str | None]] = []
+
+    def __call__(
+        self,
+        query: str,
+        max_results: int,
+        page_token: str | None,
+    ) -> object:
+        self.calls.append((query, max_results, page_token))
+        return self.response
+
+
 class GmailAgentAuthenticationTests(TestCase):
     def test_existing_readonly_login_is_reused(self) -> None:
         runner = ScriptedRunner(
@@ -116,6 +131,26 @@ class GmailAgentAuthenticationTests(TestCase):
 
 
 class GmailAgentReadOperationsTests(TestCase):
+    def test_paginated_message_discovery_uses_read_only_search_options(self) -> None:
+        discovery = ScriptedDiscovery(
+            {"messages": [{"id": "message-2"}], "next_page_token": "page-3"}
+        )
+
+        result = GmailAgentAdapter(discovery_runner=discovery).list_messages(
+            "in:inbox OR in:sent",
+            max_results=40,
+            page_token="page-2",
+        )
+
+        self.assertEqual(
+            result,
+            {"messages": [{"id": "message-2"}], "next_page_token": "page-3"},
+        )
+        self.assertEqual(
+            discovery.calls,
+            [("in:inbox OR in:sent", 40, "page-2")],
+        )
+
     def test_search_handles_unicode_not_supported_by_windows_console_encoding(self) -> None:
         def encoding_sensitive_process(
             command: list[str],

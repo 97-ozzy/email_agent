@@ -63,10 +63,18 @@ permissions. Treat both files as secrets and never copy them into the project. T
 login without printing credentials, run `uv run --locked gmail-agent status`.
 
 Startup reports Gmail, Qdrant, and Ollama separately. A Gmail failure does not hide local-service
-status. If Ollama is running but `bge-m3` is missing, the CLI asks before downloading it. You may
-also install it yourself with `ollama pull bge-m3`.
+status. On the first authenticated run, the application imports the newest 100 unique messages
+from the combined Inbox and Sent scope. Set `EMAIL_AGENT_INITIAL_IMPORT_LIMIT` to a value from 1
+through 100 for a smaller import, and use `EMAIL_AGENT_DATA_DIR` to choose the archive directory
+(default: `data`). Complete message bodies are stored under that directory and metadata plus
+ingestion/indexing state are stored in `archive.sqlite3`. Later starts reuse completed records
+without downloading them again. If an import is partial, the CLI reports actual counts and keeps
+the completed records usable.
 
-Interactive commands in this ticket:
+If Ollama is running but `bge-m3` is missing, the CLI asks before downloading it. You may also
+install it yourself with `ollama pull bge-m3`.
+
+Interactive commands currently available:
 
 - `/help` — list supported commands
 - `/status` - refresh Gmail, Qdrant, Ollama, and embedding-model diagnostics

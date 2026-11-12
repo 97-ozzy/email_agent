@@ -1,2 +1,1 @@
 """Local email agent application."""
-

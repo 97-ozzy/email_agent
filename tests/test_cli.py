@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from io import StringIO
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from email_agent.cli import run_application
 from email_agent.gmail import GmailAccessError, GmailStatus
 from email_agent.services import ServiceStatus
 
+TEST_DATA_DIRECTORY = TemporaryDirectory()
 VALID_ENV = {
     "OPENROUTER_API_KEY": "test-key",
     "OPENROUTER_MODEL": "test/model",
+    "EMAIL_AGENT_DATA_DIR": TEST_DATA_DIRECTORY.name,
 }
 
 
@@ -65,6 +68,15 @@ class ControlledGmail:
     def search_messages(self, query: str) -> object:
         self.searches.append(query)
         return {"messages": [{"id": "message-1", "subject": "Quarterly report"}]}
+
+    def list_messages(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        page_token: str | None = None,
+    ) -> object:
+        return {"messages": [], "next_page_token": None}
 
     def get_message(self, message_id: str) -> object:
         self.message_ids.append(message_id)
@@ -143,6 +155,22 @@ class ConfigurationTests(TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("QDRANT_URL must be an http(s) URL", stderr.getvalue())
+
+    def test_initial_import_limit_above_100_is_rejected(self) -> None:
+        stderr = StringIO()
+
+        exit_code = run_application(
+            environ={**VALID_ENV, "EMAIL_AGENT_INITIAL_IMPORT_LIMIT": "101"},
+            stdin=StringIO(""),
+            stdout=StringIO(),
+            stderr=stderr,
+        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn(
+            "EMAIL_AGENT_INITIAL_IMPORT_LIMIT must be between 1 and 100",
+            stderr.getvalue(),
+        )
 
 
 class InteractiveCliTests(TestCase):

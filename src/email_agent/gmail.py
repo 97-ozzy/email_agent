@@ -8,7 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from subprocess import CompletedProcess
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 READONLY_LEVEL = "readonly"
 ReadCommand = Literal["search", "message", "thread"]
@@ -22,6 +22,17 @@ class CommandRunner(Protocol):
     """Execute one gmail-agent command."""
 
     def __call__(self, command: list[str], capture_output: bool) -> CompletedProcess[str]: ...
+
+
+class DiscoveryRunner(Protocol):
+    """List Gmail message IDs without downloading message contents."""
+
+    def __call__(
+        self,
+        query: str,
+        max_results: int,
+        page_token: str | None,
+    ) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -45,6 +56,15 @@ class GmailAdapter(Protocol):
     def search_messages(self, query: str) -> object:
         """Search Gmail messages using Gmail query syntax."""
 
+    def list_messages(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        page_token: str | None = None,
+    ) -> object:
+        """Retrieve one newest-first page for deterministic ingestion."""
+
     def get_message(self, message_id: str) -> object:
         """Retrieve one Gmail message."""
 
@@ -55,8 +75,14 @@ class GmailAdapter(Protocol):
 class GmailAgentAdapter:
     """Adapter for the open-source gmail-agent integration."""
 
-    def __init__(self, *, runner: CommandRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: CommandRunner | None = None,
+        discovery_runner: DiscoveryRunner | None = None,
+    ) -> None:
         self._runner = runner or _run_command
+        self._discovery_runner = discovery_runner or _list_message_ids
 
     def ensure_authenticated(self) -> GmailStatus:
         details = self._status_details()
@@ -88,6 +114,15 @@ class GmailAgentAdapter:
     def search_messages(self, query: str) -> object:
         return self._read_json("search", query)
 
+    def list_messages(
+        self,
+        query: str,
+        *,
+        max_results: int,
+        page_token: str | None = None,
+    ) -> object:
+        return self._discovery_runner(query, max_results, page_token)
+
     def get_message(self, message_id: str) -> object:
         return self._read_json("message", message_id)
 
@@ -102,7 +137,10 @@ class GmailAgentAdapter:
         return {"problem": "gmail-agent returned an invalid status response"}
 
     def _read_json(self, operation: ReadCommand, argument: str) -> object:
-        result = self._runner(["gmail-agent", operation, argument, "--json"], True)
+        return self._run_json_command(["gmail-agent", operation, argument, "--json"], operation)
+
+    def _run_json_command(self, command: list[str], operation: str) -> object:
+        result = self._runner(command, True)
         payload = _decode_json(result.stdout)
         if result.returncode != 0:
             raise GmailAccessError(_safe_error(payload, operation))
@@ -122,6 +160,50 @@ def _run_command(command: list[str], capture_output: bool) -> CompletedProcess[s
         )
     except FileNotFoundError:
         return CompletedProcess(command, 127, stdout="", stderr="gmail-agent is not installed")
+
+
+def _list_message_ids(
+    query: str,
+    max_results: int,
+    page_token: str | None,
+) -> object:
+    """Use gmail-agent's saved credentials for an IDs-only Gmail API request."""
+    try:
+        from gmail_agent import auth  # type: ignore[import-untyped]
+
+        credentials = auth.load_credentials()
+        service: Any = auth.build_service(credentials)
+        response = (
+            service.users()
+            .messages()
+            .list(
+                userId="me",
+                q=query,
+                maxResults=max(1, min(max_results, 100)),
+                pageToken=page_token or None,
+            )
+            .execute(num_retries=2)
+        )
+    except Exception as exc:
+        raise GmailAccessError(
+            "Gmail message discovery failed; run `gmail-agent status` for details"
+        ) from exc
+
+    if not isinstance(response, dict):
+        raise GmailAccessError("Gmail message discovery returned an invalid response")
+    raw_messages = response.get("messages", [])
+    messages = []
+    if isinstance(raw_messages, list):
+        messages = [
+            {"id": item["id"]}
+            for item in raw_messages
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
+    return {
+        "query": query,
+        "messages": messages,
+        "next_page_token": response.get("nextPageToken"),
+    }
 
 
 def _decode_json(text: str | None) -> object:
