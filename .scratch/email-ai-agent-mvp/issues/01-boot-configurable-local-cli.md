@@ -4,8 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
-
+**Status:** implemented
 - [ ] The project installs reproducibly with uv using standard Python project metadata.
 - [ ] Launching the CLI validates required environment settings and reports actionable configuration errors without a raw traceback in normal mode.
 - [ ] The CLI implements `/help`, `/status`, and `/exit`, and ordinary startup reaches an interactive prompt when the minimum configuration is valid.

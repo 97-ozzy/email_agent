@@ -4,7 +4,7 @@
 
 **Blocked by:** 02: Authenticate Gmail with read-only access
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 - [ ] The initial import limit defaults to 100, accepts smaller positive values, and rejects values above 100 with a clear error.
 - [ ] Message discovery covers the union of Inbox and Sent, orders results newest first, handles pagination, and deduplicates Gmail message IDs.

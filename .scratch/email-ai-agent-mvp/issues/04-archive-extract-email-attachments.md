@@ -4,7 +4,7 @@
 
 **Blocked by:** 03: Import and persist recent email bodies
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 - [ ] Accessible attachments are saved locally and remain associated with every message in which they appear.
 - [ ] Attachment bytes are keyed by SHA-256 so identical content is stored once while distinct files with the same filename remain distinct.

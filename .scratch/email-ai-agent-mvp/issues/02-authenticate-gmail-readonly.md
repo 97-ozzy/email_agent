@@ -4,7 +4,7 @@
 
 **Blocked by:** 01: Boot a configurable local CLI
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 - [ ] First use initiates an OAuth browser flow when valid credentials are unavailable.
 - [ ] The requested Gmail scope is limited to `gmail.readonly`, and no send, draft, delete, archive, or label-modification operation is exposed.
