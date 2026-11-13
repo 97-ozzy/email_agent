@@ -239,6 +239,7 @@ def run_cli(
                             backend,
                             model=model,
                             notify=notify,
+                            gmail=gmail,
                         )
                 stdout.write(chat.ask(command) + "\n")
             except ChatError as exc:

@@ -27,7 +27,7 @@ from email_agent.archive import SQLiteArchive
 from email_agent.chat import ChatError, ChatSession, LocalArchive, openrouter_model
 from email_agent.cli import run_application
 from email_agent.config import ConfigurationError, Settings
-from email_agent.gmail import GmailStatus
+from email_agent.gmail import GmailAccessError, GmailStatus
 from email_agent.retrieval import HybridSearchIndex
 from email_agent.search import DocumentContext, SearchResult
 
@@ -47,6 +47,246 @@ class ChatTests(TestCase):
             client=self.client,
             embed_model=ControlledEmbedding(),
         )
+
+    def test_cli_answers_from_live_search_without_ingesting_results(self) -> None:
+        gmail = ControlledGmail(GmailStatus(True))
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            part = messages[-1].parts[0]
+            if isinstance(part, UserPromptPart):
+                return ModelResponse(
+                    parts=[ToolCallPart("search_gmail", {"query": "older report"})]
+                )
+            assert isinstance(part, ToolReturnPart)
+            assert isinstance(part.content, dict)
+            self.assertEqual(part.content["source"], "live_gmail")
+            self.assertEqual(part.content["data"]["messages"][0]["id"], "message-1")
+            return ModelResponse(
+                parts=[TextPart("Live Gmail: Quarterly report [message:message-1].")]
+            )
+
+        stdout = StringIO()
+        with patch("email_agent.cli.openrouter_model", return_value=FunctionModel(model)):
+            code = run_application(
+                environ={
+                    "OPENROUTER_API_KEY": "key",
+                    "OPENROUTER_MODEL": "model",
+                    "EMAIL_AGENT_DATA_DIR": self.directory.name,
+                },
+                stdin=StringIO("Find an older report\n/exit\n"),
+                stdout=stdout,
+                stderr=StringIO(),
+                services_factory=lambda settings: AvailableServices(),
+                gmail_factory=lambda: gmail,
+                search_factory=lambda settings, archive: self.index,
+            )
+        self.assertEqual(code, 0)
+        self.assertIn("Live Gmail: Quarterly report [message:message-1]", stdout.getvalue())
+        self.assertEqual(gmail.searches, ["older report"])
+        self.assertEqual(self.archive.completed_message_ids(), {"invoice"})
+
+    def run_live_chat(
+        self,
+        model: Callable[[list[ModelMessage], AgentInfo], ModelResponse],
+        gmail: ControlledGmail,
+        question: str,
+    ) -> str:
+        stdout = StringIO()
+        with patch("email_agent.cli.openrouter_model", return_value=FunctionModel(model)):
+            code = run_application(
+                environ={
+                    "OPENROUTER_API_KEY": "key",
+                    "OPENROUTER_MODEL": "model",
+                    "EMAIL_AGENT_DATA_DIR": self.directory.name,
+                },
+                stdin=StringIO(question + "\n/exit\n"),
+                stdout=stdout,
+                stderr=StringIO(),
+                services_factory=lambda settings: AvailableServices(),
+                gmail_factory=lambda: gmail,
+                search_factory=lambda settings, archive: self.index,
+            )
+        self.assertEqual(code, 0)
+        return stdout.getvalue()
+
+    def test_cli_combines_local_evidence_with_recent_message_and_complete_thread(self) -> None:
+        class UpdatedGmail(ControlledGmail):
+            def get_message(self, message_id: str) -> object:
+                return {"id": message_id, "thread_id": "negotiation", "body": "Propose 50 EUR."}
+
+            def get_thread(self, thread_id: str) -> object:
+                return {
+                    "id": thread_id,
+                    "messages": [
+                        {"id": "proposal", "body": "Propose 50 EUR."},
+                        {"id": "agreement", "body": "Agreed to 45 EUR.", "date": "2026-11-13"},
+                    ],
+                }
+
+        stage = 0
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal stage
+            stage += 1
+            self.assertIn(
+                "For current or recent changes, consult live Gmail", info.instructions or ""
+            )
+            self.assertIn(
+                "Distinguish local-index evidence from live Gmail", info.instructions or ""
+            )
+            if stage == 1:
+                return ModelResponse(parts=[ToolCallPart("search_email_rag", {"query": "invoice"})])
+            part = messages[-1].parts[0]
+            assert isinstance(part, ToolReturnPart)
+            if stage == 2:
+                assert isinstance(part.content, list)
+                self.assertIn("42 EUR", part.content[0].text)
+                return ModelResponse(
+                    parts=[ToolCallPart("get_gmail_message", {"message_id": "proposal"})]
+                )
+            assert isinstance(part.content, dict)
+            self.assertEqual(part.content["source"], "live_gmail")
+            if stage == 3:
+                self.assertIn("50 EUR", part.content["data"]["body"])
+                return ModelResponse(
+                    parts=[ToolCallPart("get_gmail_thread", {"thread_id": "negotiation"})]
+                )
+            self.assertEqual(len(part.content["data"]["messages"]), 2)
+            self.assertIn("45 EUR", part.content["data"]["messages"][1]["body"])
+            return ModelResponse(
+                parts=[
+                    TextPart(
+                        "Local-index invoice: 42 EUR [message:invoice]. Live Gmail agreement: "
+                        "45 EUR on 2026-11-13 [message:agreement] [thread:negotiation]."
+                    )
+                ]
+            )
+
+        output = self.run_live_chat(
+            model, UpdatedGmail(GmailStatus(True)), "What changed recently?"
+        )
+        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn("45 EUR on 2026-11-13 [message:agreement] [thread:negotiation]", output)
+        self.assertEqual(self.archive.completed_message_ids(), {"invoice"})
+
+    def test_cli_local_answers_disclose_unavailable_live_coverage(self) -> None:
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if isinstance(messages[-1].parts[0], UserPromptPart):
+                return ModelResponse(parts=[ToolCallPart("search_email_rag", {"query": "invoice"})])
+            return ModelResponse(parts=[TextPart("Local-index invoice: 42 EUR [message:invoice].")])
+
+        output = self.run_live_chat(
+            model, ControlledGmail(GmailStatus(False)), "What is the total?"
+        )
+        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn("live coverage could not be checked", output)
+
+    def test_cli_local_only_answer_does_not_read_live_mail(self) -> None:
+        gmail = ControlledGmail(GmailStatus(True))
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if isinstance(messages[-1].parts[0], UserPromptPart):
+                return ModelResponse(parts=[ToolCallPart("search_email_rag", {"query": "invoice"})])
+            return ModelResponse(parts=[TextPart("Local-index invoice: 42 EUR [message:invoice].")])
+
+        output = self.run_live_chat(model, gmail, "What did the archived invoice say?")
+        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertEqual(gmail.searches, [])
+        self.assertEqual(gmail.message_ids, [])
+        self.assertEqual(gmail.thread_ids, [])
+
+    def test_cli_empty_local_search_can_continue_to_live_and_disclose_query_coverage(self) -> None:
+        class EmptyGmail(ControlledGmail):
+            def search_messages(self, query: str) -> object:
+                return {"messages": []}
+
+        stage = 0
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal stage
+            stage += 1
+            self.assertIn("Empty local results say nothing", info.instructions or "")
+            self.assertIn(
+                "Empty live results only describe the particular query", info.instructions or ""
+            )
+            if stage == 1:
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            "search_email_rag",
+                            {"query": "agreement", "sender": "absent@example.com"},
+                        )
+                    ]
+                )
+            part = messages[-1].parts[0]
+            assert isinstance(part, ToolReturnPart)
+            if stage == 2:
+                self.assertEqual(part.content, [])
+                return ModelResponse(parts=[ToolCallPart("search_gmail", {"query": "agreement"})])
+            assert isinstance(part.content, dict)
+            self.assertEqual(part.content["data"]["messages"], [])
+            return ModelResponse(
+                parts=[
+                    TextPart(
+                        "Insufficient evidence: no local matches or live Gmail matches "
+                        "for this query. "
+                        "Other mailbox searches may find relevant messages."
+                    )
+                ]
+            )
+
+        output = self.run_live_chat(model, EmptyGmail(GmailStatus(True)), "Find the agreement")
+        self.assertIn("Other mailbox searches may find relevant messages", output)
+
+    def test_cli_failed_live_read_allows_local_answer_without_exposing_diagnostics(self) -> None:
+        class FailingGmail(ControlledGmail):
+            def get_thread(self, thread_id: str) -> object:
+                raise GmailAccessError("private token and correspondence diagnostic")
+
+        stage = 0
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal stage
+            stage += 1
+            if stage == 1:
+                return ModelResponse(
+                    parts=[ToolCallPart("get_gmail_thread", {"thread_id": "invoice"})]
+                )
+            part = messages[-1].parts[0]
+            assert isinstance(part, ToolReturnPart)
+            if stage == 2:
+                assert isinstance(part.content, dict)
+                self.assertIn("live coverage could not be checked", part.content["error"])
+                self.assertNotIn("private token", str(part.content))
+                return ModelResponse(parts=[ToolCallPart("search_email_rag", {"query": "invoice"})])
+            return ModelResponse(parts=[TextPart("Local-index invoice: 42 EUR [message:invoice].")])
+
+        output = self.run_live_chat(
+            model, FailingGmail(GmailStatus(True)), "Any updated agreement?"
+        )
+        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn("live coverage could not be checked", output)
+        self.assertNotIn("private token", output)
+
+    def test_live_evidence_survives_investigation_limit_and_failed_synthesis(self) -> None:
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if isinstance(messages[-1].parts[0], ToolReturnPart):
+                raise RuntimeError("provider unavailable")
+            return ModelResponse(
+                parts=[ToolCallPart("get_gmail_message", {"message_id": "live-id"})]
+            )
+
+        session = ChatSession(
+            replace(self.settings, tool_call_limit=1),
+            self.index,
+            gmail=ControlledGmail(GmailStatus(True)),
+            model=FunctionModel(model),
+        )
+        answer = session.ask("Read the live message")
+        self.assertIn("Message body", answer)
+        self.assertIn("[message:live-id]", answer)
+        self.assertIn("Live Gmail", answer)
+        self.assertIn("limit reached", answer)
 
     def test_missing_local_evidence_is_disclosed_without_mailbox_wide_claim(self) -> None:
         def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

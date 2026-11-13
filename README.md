@@ -158,6 +158,21 @@ attachments again.
 
 ### Running checks
 
+Chat can choose local retrieval, live Gmail search, complete messages, or complete threads.
+For recent changes it is instructed to check live Gmail; older correspondence outside the
+archive can also be read live. Answers identify local-index versus live Gmail evidence and
+cite message/thread IDs. Live reads stay in the in-memory conversation and do not expand
+the persistent archive. If Gmail is unavailable, local answers remain usable and disclose
+that live coverage could not be checked. Selected live correspondence is sent to OpenRouter
+as tool evidence, just like selected local passages.
+
+The live tools reuse the read-only `gmail-agent` adapter, not a separate MCP server process.
+Verified installed interfaces: gmail-agent 0.3.1 (`search`, `message`, `thread` JSON output;
+`--max-chars 0` for complete message/thread bodies) and pydantic-ai-slim 1.107.10
+(`Agent.tool`, dynamic instructions, and shared per-investigation tool limits).
+Automated tests use a controlled model and Gmail adapter; they verify tool execution and
+policy instructions, not real-model source-selection reliability or live-account acceptance.
+
 The CLI/application tests use controlled service adapters and do not require Docker or secrets:
 
 ```shell

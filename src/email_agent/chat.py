@@ -1,4 +1,4 @@
-"""Bounded conversational investigation of local archive evidence."""
+"""Bounded conversational investigation of local archive and live Gmail evidence."""
 
 from __future__ import annotations
 
@@ -27,9 +27,23 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
 
 from email_agent.config import Settings
+from email_agent.gmail import GmailAdapter
 from email_agent.search import DocumentContext, SearchBackend, SearchRequest, SearchResult
 
-INSTRUCTIONS = """You answer questions using a local, incomplete email archive.
+INSTRUCTIONS = """You answer questions using a local, incomplete email archive and live Gmail.
+Choose local retrieval, live Gmail, or both based on the question; no fixed tool sequence
+is required. For current or recent changes, consult live Gmail when available, even
+if local evidence or previous conversation history seems sufficient.
+Use search_gmail for older or unindexed correspondence and when local evidence is insufficient.
+Search returns candidates, not complete message bodies: open messages to verify details.
+Use get_gmail_thread for complete conversational context when interpreting decisions or agreements.
+Distinguish local-index evidence from live Gmail evidence explicitly in answers. Cite live
+messages using [message:MESSAGE_ID] and threads using [thread:THREAD_ID], with available
+sender, date, subject, and original source locations. Only cite returned identifiers.
+Live reads do not ingest or index messages. Empty local results say nothing about the
+full mailbox. Empty live results only describe the particular query, not definitive absence.
+If Gmail is unavailable, answer from local evidence and disclose live coverage could not
+be checked. Do not present local or historical evidence as verified current information.
 Use search_email_rag and get_local_document repeatedly when more evidence is needed.
 Tools return evidence and metadata, never a separately generated answer.
 Cite every email-related factual claim near the claim using [message:MESSAGE_ID], and
@@ -143,6 +157,8 @@ class Investigation:
     calls: int = 0
     evidence: list[SearchResult] = field(default_factory=list)
     contexts: list[DocumentContext] = field(default_factory=list)
+    live_evidence: list[dict[str, object]] = field(default_factory=list)
+    live_unavailable: bool = False
 
     def begin(self, name: str) -> bool:
         if self.calls >= self.limit:
@@ -169,12 +185,14 @@ class ChatSession:
         *,
         model: Model | None = None,
         notify: Callable[[str], None] = lambda name: None,
+        gmail: GmailAdapter | None = None,
     ) -> None:
         if settings.tool_call_limit < 1:
             raise ChatError("Tool-call limit must be positive.")
         self.settings = settings
         self.archive = archive
         self.notify = notify
+        self.gmail = gmail
         self._exchanges: deque[list[ModelMessage]] = deque(maxlen=10)
         model_settings: OpenRouterModelSettings = {
             "openrouter_provider": {"require_parameters": True},
@@ -185,6 +203,38 @@ class ChatSession:
             instructions=INSTRUCTIONS,
             model_settings=model_settings,
         )
+
+        @self.agent.instructions
+        def live_coverage(ctx: RunContext[Investigation]) -> str:
+            if ctx.deps.live_unavailable:
+                return "Live Gmail unavailable this turn; live coverage could not be checked."
+            return "Live Gmail is available this turn."
+
+        @self.agent.tool(prepare=available_tool, sequential=True)
+        def search_gmail(ctx: RunContext[Investigation], query: str) -> dict[str, object]:
+            """Search the live mailbox using Gmail query syntax, including older/unindexed mail.
+
+            Returns candidate message/thread IDs and available metadata; open a message
+            or thread to read complete evidence. Results are not saved to the local index.
+            """
+            return self._read_gmail(ctx.deps, "search_gmail", query)
+
+        @self.agent.tool(prepare=available_tool, sequential=True)
+        def get_gmail_message(ctx: RunContext[Investigation], message_id: str) -> dict[str, object]:
+            """Read a complete live Gmail message by ID, preserving source metadata.
+
+            Use to verify search candidates. Does not save or index the message.
+            """
+            return self._read_gmail(ctx.deps, "get_gmail_message", message_id)
+
+        @self.agent.tool(prepare=available_tool, sequential=True)
+        def get_gmail_thread(ctx: RunContext[Investigation], thread_id: str) -> dict[str, object]:
+            """Read all messages in a live Gmail thread by ID for conversational context.
+
+            Use when interpreting decisions, agreements, or conflicting replies.
+            Does not save or index the thread.
+            """
+            return self._read_gmail(ctx.deps, "get_gmail_thread", thread_id)
 
         @self.agent.tool(prepare=available_tool, sequential=True)
         def search_email_rag(
@@ -249,6 +299,31 @@ class ChatSession:
             except Exception:
                 return {"error": "Local document unavailable; disclose incomplete evidence."}
 
+    def _read_gmail(
+        self, investigation: Investigation, name: str, argument: str
+    ) -> dict[str, object]:
+        if not investigation.begin(name):
+            return {"error": "Investigation tool-call limit reached; answer from prior evidence."}
+        try:
+            if self.gmail is None or not self.gmail.status().available:
+                raise RuntimeError("Gmail unavailable")
+            operation = {
+                "search_gmail": self.gmail.search_messages,
+                "get_gmail_message": self.gmail.get_message,
+                "get_gmail_thread": self.gmail.get_thread,
+            }[name]
+            data = operation(argument)
+        except Exception:
+            investigation.live_unavailable = True
+            return {
+                "source": "live_gmail",
+                "error": "Gmail unavailable; live coverage could not be checked. "
+                "Use local evidence.",
+            }
+        result = {"source": "live_gmail", "operation": name, "data": data}
+        investigation.live_evidence.append(result)
+        return result
+
     @property
     def history(self) -> list[ModelMessage]:
         return [message for exchange in self._exchanges for message in exchange]
@@ -258,6 +333,10 @@ class ChatSession:
 
     def ask(self, question: str) -> str:
         investigation = Investigation(self.settings.tool_call_limit, self.notify)
+        try:
+            investigation.live_unavailable = self.gmail is None or not self.gmail.status().available
+        except Exception:
+            investigation.live_unavailable = True
         try:
             result = self.agent.run_sync(
                 question,
@@ -281,8 +360,12 @@ class ChatSession:
             ) from exc
         answer = result.output
         messages = result.new_messages()
+        notice = ""
         if investigation.calls >= investigation.limit:
-            notice = "\n\nInvestigation tool-call limit reached; this answer may be partial."
+            notice += "\n\nInvestigation tool-call limit reached; this answer may be partial."
+        if investigation.live_unavailable and self.gmail is not None:
+            notice += "\n\nGmail unavailable; live coverage could not be checked."
+        if notice:
             answer += notice
             last = messages[-1]
             if isinstance(last, ModelResponse):
@@ -292,8 +375,11 @@ class ChatSession:
 
     def _partial_answer(self, question: str, investigation: Investigation) -> str:
         answer = "Investigation limit reached. Evidence is insufficient for a complete answer."
+        if investigation.live_unavailable and self.gmail is not None:
+            answer += "\nGmail unavailable; live coverage could not be checked."
         evidence = list(investigation.evidence)
         contexts = list(investigation.contexts)
+        live_evidence = list(investigation.live_evidence)
         for message in self.history:
             for part in message.parts:
                 if isinstance(part, ToolReturnPart):
@@ -303,6 +389,12 @@ class ChatSession:
                         )
                     elif isinstance(part.content, DocumentContext):
                         contexts.append(part.content)
+                    elif (
+                        isinstance(part.content, dict)
+                        and part.content.get("source") == "live_gmail"
+                        and "data" in part.content
+                    ):
+                        live_evidence.append(part.content)
         for item in evidence:
             citation = f"message:{item.gmail_message_id}"
             if item.attachment_id:
@@ -310,7 +402,7 @@ class ChatSession:
                     f" attachment:{item.attachment_id} filename:{item.filename}"
                     f" chunk:{item.chunk_id}"
                 )
-            answer += f"\nSource excerpt [{citation}]: {item.text}"
+            answer += f"\nLocal-index source excerpt [{citation}]: {item.text}"
         for context in contexts:
             for chunk in context.chunks:
                 citation = f"message:{chunk.metadata.get('gmail_message_id', '')}"
@@ -320,7 +412,27 @@ class ChatSession:
                         f"message:{source.gmail_message_id} attachment:{source.attachment_id}"
                         f" filename:{source.filename} chunk:{chunk.chunk_id}"
                     )
-                answer += f"\nSource excerpt [{citation}]: {chunk.text}"
+                answer += f"\nLocal-index source excerpt [{citation}]: {chunk.text}"
+        for live_item in live_evidence:
+            data = live_item.get("data")
+            citations = []
+            if isinstance(data, dict):
+                if live_item.get("operation") == "get_gmail_message" and data.get("id"):
+                    citations.append(f"[message:{data['id']}]")
+                elif live_item.get("operation") == "get_gmail_thread":
+                    thread_id = data.get("id") or data.get("thread_id")
+                    if thread_id:
+                        citations.append(f"[thread:{thread_id}]")
+                messages = data.get("messages")
+                if isinstance(messages, list):
+                    citations.extend(
+                        f"[message:{message['id']}]"
+                        for message in messages
+                        if isinstance(message, dict) and message.get("id")
+                    )
+            answer += f"\nLive Gmail source excerpt {' '.join(citations)}: " + json.dumps(
+                data, ensure_ascii=False, default=str
+            )
         self._exchanges.append(
             [
                 ModelRequest(parts=[UserPromptPart(question)]),

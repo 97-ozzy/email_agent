@@ -131,7 +131,10 @@ class GmailAgentAdapter:
         )
 
     def get_thread(self, thread_id: str) -> object:
-        return self._read_json("thread", thread_id)
+        return self._run_json_command(
+            ["gmail-agent", "thread", thread_id, "--json", "--max-chars", "0"],
+            "thread",
+        )
 
     def list_attachments(self, message_id: str) -> object:
         return self._run_json_command(

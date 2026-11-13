@@ -273,7 +273,7 @@ class GmailAgentReadOperationsTests(TestCase):
                     ],
                     True,
                 ),
-                (["gmail-agent", "thread", "thread-1", "--json"], True),
+                (["gmail-agent", "thread", "thread-1", "--json", "--max-chars", "0"], True),
             ],
         )
 
