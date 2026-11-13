@@ -16,3 +16,6 @@ qdrant_storage/
 ollama_storage/
 .venv-qwen/
 .venv-legacy-314/
+
+# Local Langfuse infrastructure secrets
+infra/langfuse/.env

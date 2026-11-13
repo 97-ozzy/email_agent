@@ -33,6 +33,13 @@ class Settings:
     document_context_tokens: int = 3000
     tool_call_limit: int = 10
 
+    langfuse_enabled: bool = False
+    langfuse_base_url: str = "http://localhost:3000"
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_environment: str = "local"
+    langfuse_capture_content: bool = False
+
     @classmethod
     def from_environ(cls, environ: Mapping[str, str]) -> Settings:
         problems: list[str] = []
@@ -109,6 +116,36 @@ class Settings:
         except ValueError:
             tool_call_limit = 0
             problems.append("EMAIL_AGENT_TOOL_CALL_LIMIT must be a positive integer")
+        tracing_bools: dict[str, bool] = {}
+        for name in ("LANGFUSE_ENABLED", "LANGFUSE_CAPTURE_CONTENT"):
+            value = environ.get(name, "false").strip().lower()
+            if value not in {"1", "0", "true", "false", "yes", "no", "on", "off"}:
+                problems.append(f"{name} must be true or false")
+            tracing_bools[name] = value in {"1", "true", "yes", "on"}
+        langfuse_url = environ.get("LANGFUSE_BASE_URL", cls.langfuse_base_url).strip().rstrip("/")
+        public_key = environ.get("LANGFUSE_PUBLIC_KEY", "").strip()
+        secret_key = environ.get("LANGFUSE_SECRET_KEY", "").strip()
+        environment = environ.get("LANGFUSE_ENVIRONMENT", "local").strip()
+        if tracing_bools["LANGFUSE_ENABLED"]:
+            parsed = urlsplit(langfuse_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+            ):
+                problems.append(
+                    "LANGFUSE_BASE_URL must be an http(s) URL without credentials/query"
+                )
+            for name, value in (
+                ("LANGFUSE_PUBLIC_KEY", public_key),
+                ("LANGFUSE_SECRET_KEY", secret_key),
+                ("LANGFUSE_ENVIRONMENT", environment),
+            ):
+                if not value:
+                    problems.append(f"{name} is required when LANGFUSE_ENABLED=true")
         if problems:
             raise ConfigurationError(problems)
 
@@ -125,4 +162,10 @@ class Settings:
             search_context_tokens=context_tokens,
             document_context_tokens=document_context_tokens,
             tool_call_limit=tool_call_limit,
+            langfuse_enabled=tracing_bools["LANGFUSE_ENABLED"],
+            langfuse_capture_content=tracing_bools["LANGFUSE_CAPTURE_CONTENT"],
+            langfuse_base_url=langfuse_url,
+            langfuse_public_key=public_key,
+            langfuse_secret_key=secret_key,
+            langfuse_environment=environment,
         )

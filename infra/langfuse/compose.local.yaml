@@ -1,0 +1,40 @@
+﻿# Local-only overlay for the unmodified official v3.160.0 stack.
+services:
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3.160.0
+    ports: !reset []
+    environment: &required
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Run setup.ps1}@postgres:5432/postgres
+      SALT: ${SALT:?Run setup.ps1}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run setup.ps1}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run setup.ps1}
+      REDIS_AUTH: ${REDIS_AUTH:?Run setup.ps1}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Run setup.ps1}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Run setup.ps1}
+      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Run setup.ps1}
+      TELEMETRY_ENABLED: "false"
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3.160.0
+    ports: !override
+      - 127.0.0.1:3000:3000
+    environment:
+      <<: *required
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Run setup.ps1}
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.3
+    ports: !reset []
+    environment:
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Run setup.ps1}
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup.ps1}
+  redis:
+    ports: !reset []
+    environment:
+      REDISCLI_AUTH: ${REDIS_AUTH:?Run setup.ps1}
+  minio:
+    ports: !override
+      - 127.0.0.1:9090:9000
+    environment:
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Run setup.ps1}

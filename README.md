@@ -247,3 +247,8 @@ expand results. Expansion reads the active collection's local document store,
 without vector queries, embedding generation, or generative model calls.
 Document stores are derived data: rebuild from SQLite and preserved source text
 using `--reindex` if needed. See [compatibility notes](docs/document-context.md).
+
+### Optional Langfuse tracing
+
+See [local Langfuse setup and tracing](docs/langfuse-tracing.md) for the standard UI at
+http://localhost:3000, project keys, privacy controls, tested versions and validation limits.

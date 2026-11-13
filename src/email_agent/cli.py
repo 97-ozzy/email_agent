@@ -166,163 +166,169 @@ def run_cli(
         return backend
 
     stdout.write("Ask a question about your local archive. Type /help for commands.\n")
-    while True:
-        stdout.write("email-agent> ")
-        stdout.flush()
-        line = stdin.readline()
-        if not line:
-            stdout.write("\nGoodbye.\n")
-            return 0
-
-        command = line.strip()
-        if not command:
-            continue
-        if command == "/exit":
-            stdout.write("Goodbye.\n")
-            return 0
-        if command == "/help":
-            stdout.write(HELP_TEXT)
-        elif command == "/clear":
-            if chat is not None:
-                chat.clear()
-            stdout.write("Conversation history cleared.\n")
-        elif command == "/status":
-            status, local_problem = _checked_service_status(services, settings.embedding_model)
-            _write_status(
-                stdout,
-                status,
-                _checked_gmail_status(gmail.status),
-                settings.embedding_model,
-                local_problem=local_problem,
-            )
-        elif command.split()[0] in {"/sync_new", "/sync_old"}:
-            parts = command.split()
-            old_limit = None
-            try:
-                if parts[0] == "/sync_old":
-                    if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit():
-                        raise ValueError("Usage: /sync_old N (positive integer)")
-                    old_limit = int(parts[1])
-                    if old_limit < 1:
-                        raise ValueError("Usage: /sync_old N (positive integer)")
-                elif len(parts) != 1:
-                    raise ValueError("Usage: /sync_new")
-            except ValueError as exc:
-                stdout.write(f"Sync error: {exc}\n")
-                continue
-            current_gmail = _checked_gmail_status(gmail.status)
-            if not current_gmail.available:
-                stdout.write(
-                    f"Sync unavailable: {current_gmail.problem or 'Gmail is unavailable'}.\n"
-                )
-                continue
-            stdout.write("Sync: discovering Inbox and Sent messages...\n")
+    try:
+        while True:
+            stdout.write("email-agent> ")
             stdout.flush()
-            try:
-                sync_report = synchronize_messages(
-                    gmail, archive, settings.attachment_max_bytes, old_limit=old_limit
-                )
-                stdout.write(
-                    f"Sync: discovered {sync_report.discovered}, "
-                    f"downloaded {sync_report.downloaded}, processed {sync_report.processed}, "
-                    f"skipped {sync_report.skipped}, failed {sync_report.failed}.\n"
-                )
-                _write_attachment_report(stdout, sync_report.attachments, include_indexed=False)
-                if sync_report.failed or sync_report.attachments.failed:
-                    _write_incomplete_archive_warning(stdout)
-            except Exception:
-                stdout.write(
-                    "Sync unavailable: archival failed; completed records remain usable.\n"
-                )
+            line = stdin.readline()
+            if not line:
+                stdout.write("\nGoodbye.\n")
+                return 0
+
+            command = line.strip()
+            if not command:
                 continue
-            try:
-                backend = get_search_backend()
-                indexed = backend.refresh()
-                stdout.write(
-                    f"Sync index: indexed {indexed} documents (emails and attachments), "
-                    f"indexed attachments {backend.last_indexed_attachments}.\n"
+            if command == "/exit":
+                stdout.write("Goodbye.\n")
+                return 0
+            if command == "/help":
+                stdout.write(HELP_TEXT)
+            elif command == "/clear":
+                if chat is not None:
+                    chat.clear()
+                stdout.write("Conversation history cleared.\n")
+            elif command == "/status":
+                status, local_problem = _checked_service_status(services, settings.embedding_model)
+                _write_status(
+                    stdout,
+                    status,
+                    _checked_gmail_status(gmail.status),
+                    settings.embedding_model,
+                    local_problem=local_problem,
                 )
-            except Exception:
-                stdout.write(
-                    "Sync index failed: indexing incomplete; archived sources are preserved. "
-                    "Check local retrieval services and retry /sync_new or /search.\n"
-                )
-        elif command == "/reindex":
-            try:
-                from email_agent.retrieval import HybridSearchIndex
+            elif command.split()[0] in {"/sync_new", "/sync_old"}:
+                parts = command.split()
+                old_limit = None
+                try:
+                    if parts[0] == "/sync_old":
+                        if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit():
+                            raise ValueError("Usage: /sync_old N (positive integer)")
+                        old_limit = int(parts[1])
+                        if old_limit < 1:
+                            raise ValueError("Usage: /sync_old N (positive integer)")
+                    elif len(parts) != 1:
+                        raise ValueError("Usage: /sync_new")
+                except ValueError as exc:
+                    stdout.write(f"Sync error: {exc}\n")
+                    continue
+                current_gmail = _checked_gmail_status(gmail.status)
+                if not current_gmail.available:
+                    stdout.write(
+                        f"Sync unavailable: {current_gmail.problem or 'Gmail is unavailable'}.\n"
+                    )
+                    continue
+                stdout.write("Sync: discovering Inbox and Sent messages...\n")
+                stdout.flush()
+                try:
+                    sync_report = synchronize_messages(
+                        gmail, archive, settings.attachment_max_bytes, old_limit=old_limit
+                    )
+                    stdout.write(
+                        f"Sync: discovered {sync_report.discovered}, "
+                        f"downloaded {sync_report.downloaded}, processed {sync_report.processed}, "
+                        f"skipped {sync_report.skipped}, failed {sync_report.failed}.\n"
+                    )
+                    _write_attachment_report(stdout, sync_report.attachments, include_indexed=False)
+                    if sync_report.failed or sync_report.attachments.failed:
+                        _write_incomplete_archive_warning(stdout)
+                except Exception:
+                    stdout.write(
+                        "Sync unavailable: archival failed; completed records remain usable.\n"
+                    )
+                    continue
+                try:
+                    backend = get_search_backend()
+                    indexed = backend.refresh()
+                    stdout.write(
+                        f"Sync index: indexed {indexed} documents (emails and attachments), "
+                        f"indexed attachments {backend.last_indexed_attachments}.\n"
+                    )
+                except Exception:
+                    stdout.write(
+                        "Sync index failed: indexing incomplete; archived sources are preserved. "
+                        "Check local retrieval services and retry /sync_new or /search.\n"
+                    )
+            elif command == "/reindex":
+                try:
+                    from email_agent.retrieval import HybridSearchIndex
 
-                backend = get_search_backend()
-                if not isinstance(backend, HybridSearchIndex):
-                    raise RuntimeError("The configured search backend cannot rebuild the index.")
-                count = backend.refresh(force=True)
-                search_backend = backend
-                stdout.write(f"Reindexed {count} archived documents from local content.\n")
-            except Exception as exc:
-                stdout.write(f"Reindex unavailable: {exc}\n")
-        elif command.startswith("/search"):
-            try:
-                request = _parse_search_request(command)
-                backend = get_search_backend()
-                backend.refresh()
-                _write_search_results(stdout, backend.search(request))
-            except ValueError as exc:
-                stdout.write(f"Search error: {exc}\n")
-            except Exception as exc:
-                stdout.write(f"Search unavailable: {exc}\n")
-        elif command.startswith("/gmail-search "):
-            query = command.removeprefix("/gmail-search ")
-            _try_write_gmail_result(
-                stdout,
-                gmail.search_messages,
-                query,
-            )
-        elif command.startswith("/gmail-message "):
-            message_id = command.removeprefix("/gmail-message ")
-            _try_write_gmail_result(
-                stdout,
-                gmail.get_message,
-                message_id,
-            )
-        elif command.startswith("/gmail-thread "):
-            thread_id = command.removeprefix("/gmail-thread ")
-            _try_write_gmail_result(
-                stdout,
-                gmail.get_thread,
-                thread_id,
-            )
-        elif command.startswith("/"):
-            stdout.write(f"Unknown command: {command}. Type /help for supported commands.\n")
-        else:
-            try:
-                if chat is None:
-
-                    def notify(name: str) -> None:
-                        stdout.write(f"Tool: {name}\n")
-                        stdout.flush()
-
-                    model = openrouter_model(settings) if chat_factory is None else None
-                    if chat_factory is not None:
-                        chat = chat_factory(settings, get_chat_archive(), notify)
-                    else:
-                        chat = ChatSession(
-                            settings,
-                            get_chat_archive,
-                            model=model,
-                            notify=notify,
-                            gmail=(
-                                live_gmail_factory(gmail)
-                                if live_gmail_factory is not None
-                                else GmailMCPAdapter(gmail.status)
-                            ),
+                    backend = get_search_backend()
+                    if not isinstance(backend, HybridSearchIndex):
+                        raise RuntimeError(
+                            "The configured search backend cannot rebuild the index."
                         )
-                stdout.write(chat.ask(command) + "\n")
-            except ChatError as exc:
-                stdout.write(f"{exc}\n")
-            except Exception:
-                stdout.write(
-                    "Chat unavailable. Check OpenRouter credentials, model tool support, "
-                    "and local retrieval services, then retry.\n"
+                    count = backend.refresh(force=True)
+                    search_backend = backend
+                    stdout.write(f"Reindexed {count} archived documents from local content.\n")
+                except Exception as exc:
+                    stdout.write(f"Reindex unavailable: {exc}\n")
+            elif command.startswith("/search"):
+                try:
+                    request = _parse_search_request(command)
+                    backend = get_search_backend()
+                    backend.refresh()
+                    _write_search_results(stdout, backend.search(request))
+                except ValueError as exc:
+                    stdout.write(f"Search error: {exc}\n")
+                except Exception as exc:
+                    stdout.write(f"Search unavailable: {exc}\n")
+            elif command.startswith("/gmail-search "):
+                query = command.removeprefix("/gmail-search ")
+                _try_write_gmail_result(
+                    stdout,
+                    gmail.search_messages,
+                    query,
                 )
+            elif command.startswith("/gmail-message "):
+                message_id = command.removeprefix("/gmail-message ")
+                _try_write_gmail_result(
+                    stdout,
+                    gmail.get_message,
+                    message_id,
+                )
+            elif command.startswith("/gmail-thread "):
+                thread_id = command.removeprefix("/gmail-thread ")
+                _try_write_gmail_result(
+                    stdout,
+                    gmail.get_thread,
+                    thread_id,
+                )
+            elif command.startswith("/"):
+                stdout.write(f"Unknown command: {command}. Type /help for supported commands.\n")
+            else:
+                try:
+                    if chat is None:
+
+                        def notify(name: str) -> None:
+                            stdout.write(f"Tool: {name}\n")
+                            stdout.flush()
+
+                        model = openrouter_model(settings) if chat_factory is None else None
+                        if chat_factory is not None:
+                            chat = chat_factory(settings, get_chat_archive(), notify)
+                        else:
+                            chat = ChatSession(
+                                settings,
+                                get_chat_archive,
+                                model=model,
+                                notify=notify,
+                                gmail=(
+                                    live_gmail_factory(gmail)
+                                    if live_gmail_factory is not None
+                                    else GmailMCPAdapter(gmail.status)
+                                ),
+                            )
+                    stdout.write(chat.ask(command) + "\n")
+                except ChatError as exc:
+                    stdout.write(f"{exc}\n")
+                except Exception:
+                    stdout.write(
+                        "Chat unavailable. Check OpenRouter credentials, model tool support, "
+                        "and local retrieval services, then retry.\n"
+                    )
+    finally:
+        if chat is not None:
+            chat.close()
 
 
 def _parse_search_request(command: str) -> SearchRequest:

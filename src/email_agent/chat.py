@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated, Protocol, runtime_checkable
+from uuid import uuid4
 
 import httpx
 from pydantic import Field
@@ -26,6 +27,7 @@ from pydantic_ai.models.openrouter import OpenRouterModel, OpenRouterModelSettin
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.tools import ToolDefinition
 
+from email_agent import tracing as telemetry
 from email_agent.config import Settings
 from email_agent.gmail import LiveGmail
 from email_agent.search import DocumentContext, SearchBackend, SearchRequest, SearchResult
@@ -160,6 +162,8 @@ class Investigation:
     contexts: list[DocumentContext] = field(default_factory=list)
     live_evidence: list[dict[str, object]] = field(default_factory=list)
     live_unavailable: bool = False
+    source_degraded: bool = False
+    limit_reached: bool = False
 
     def begin(self, name: str) -> bool:
         if self.calls >= self.limit:
@@ -187,10 +191,14 @@ class ChatSession:
         model: Model | None = None,
         notify: Callable[[str], None] = lambda name: None,
         gmail: LiveGmail | None = None,
+        tracing: telemetry.Tracing | None = None,
     ) -> None:
         if settings.tool_call_limit < 1:
             raise ChatError("Tool-call limit must be positive.")
+        selected_model = model or openrouter_model(settings)
         self.settings = settings
+        self.tracing = tracing or telemetry.Tracing(settings)
+        self.session_id = str(uuid4())
         self._archive = archive
         self.notify = notify
         self.gmail = gmail
@@ -199,10 +207,11 @@ class ChatSession:
             "openrouter_provider": {"require_parameters": True},
         }
         self.agent: Agent[Investigation, str] = Agent(
-            model or openrouter_model(settings),
+            selected_model,
             deps_type=Investigation,
             instructions=INSTRUCTIONS,
             model_settings=model_settings,
+            capabilities=self.tracing.instrumentation(),
         )
 
         @self.agent.instructions
@@ -269,6 +278,8 @@ class ChatSession:
                     )
                 )
             except Exception:
+                ctx.deps.source_degraded = True
+                telemetry.current_failure("local_search_unavailable")
                 return {
                     "error": "Local search unavailable; disclose missing evidence and retry later."
                 }
@@ -295,9 +306,14 @@ class ChatSession:
                     chunk_index=chunk_index,
                     num_nodes=num_nodes,
                 )
+                if context.error is not None:
+                    ctx.deps.source_degraded = True
+                    telemetry.current_failure("local_document_unavailable")
                 ctx.deps.contexts.append(context)
                 return context
             except Exception:
+                ctx.deps.source_degraded = True
+                telemetry.current_failure("local_document_unavailable")
                 return {"error": "Local document unavailable; disclose incomplete evidence."}
 
     def _read_gmail(
@@ -308,14 +324,22 @@ class ChatSession:
         try:
             if self.gmail is None or not self.gmail.status().available:
                 raise RuntimeError("Gmail unavailable")
-            operation = {
-                "search_gmail": self.gmail.search_messages,
-                "get_gmail_message": self.gmail.get_message,
-                "get_gmail_thread": self.gmail.get_thread,
+            operation, operation_name = {
+                "search_gmail": (self.gmail.search_messages, "gmail.search_messages"),
+                "get_gmail_message": (self.gmail.get_message, "gmail.get_message"),
+                "get_gmail_thread": (self.gmail.get_thread, "gmail.get_thread"),
             }[name]
-            data = operation(argument)
+            with telemetry.stage(operation_name) as span:
+                data = operation(argument)
+                if isinstance(data, dict) and isinstance(data.get("messages"), list):
+                    count_key = "results_returned" if name == "search_gmail" else "messages_read"
+                    span.set_attribute(f"email_agent.{count_key}", len(data["messages"]))
+                    span.set_attribute("email_agent.empty", not data["messages"])
+                elif name == "get_gmail_message":
+                    span.set_attribute("email_agent.messages_read", 1)
         except Exception:
             investigation.live_unavailable = True
+            telemetry.current_failure("gmail_unavailable")
             return {
                 "source": "live_gmail",
                 "error": "Gmail unavailable; live coverage could not be checked. "
@@ -338,8 +362,34 @@ class ChatSession:
     def clear(self) -> None:
         self._exchanges.clear()
 
+    def close(self) -> None:
+        self.tracing.close()
+
     def ask(self, question: str) -> str:
         investigation = Investigation(self.settings.tool_call_limit, self.notify)
+        with self.tracing.turn(self.session_id, question) as span:
+            try:
+                answer = self._ask(question, investigation)
+            except Exception:
+                telemetry.outcome(
+                    span,
+                    error=True,
+                    limit=investigation.calls >= investigation.limit,
+                    gmail_unavailable=investigation.live_unavailable,
+                    degraded=investigation.source_degraded,
+                )
+                raise
+            telemetry.outcome(
+                span,
+                limit=investigation.limit_reached or investigation.calls >= investigation.limit,
+                gmail_unavailable=investigation.live_unavailable,
+                degraded=investigation.source_degraded,
+            )
+            if self.settings.langfuse_capture_content:
+                span.set_attribute("langfuse.trace.output", answer)
+            return answer
+
+    def _ask(self, question: str, investigation: Investigation) -> str:
         try:
             investigation.live_unavailable = self.gmail is None or not self.gmail.status().available
         except Exception:
@@ -353,6 +403,7 @@ class ChatSession:
             )
         except Exception as exc:
             if isinstance(exc, UsageLimitExceeded) or investigation.calls >= investigation.limit:
+                investigation.limit_reached = True
                 return self._partial_answer(question, investigation)
             if isinstance(exc, ModelHTTPError):
                 raise ChatError(
