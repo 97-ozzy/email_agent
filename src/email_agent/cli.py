@@ -17,7 +17,14 @@ from email_agent.archive import ArchiveState, SQLiteArchive
 from email_agent.attachments import AttachmentReport, process_pending_attachments
 from email_agent.chat import ChatError, ChatSession, LocalArchive, openrouter_model
 from email_agent.config import ConfigurationError, Settings
-from email_agent.gmail import GmailAccessError, GmailAdapter, GmailAgentAdapter, GmailStatus
+from email_agent.gmail import (
+    GmailAccessError,
+    GmailAdapter,
+    GmailAgentAdapter,
+    GmailMCPAdapter,
+    GmailStatus,
+    LiveGmail,
+)
 from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
 from email_agent.search import SearchBackend, SearchRequest, SearchResult
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
@@ -47,6 +54,7 @@ def run_application(
     stderr: TextIO,
     services_factory: Callable[[Settings], ServiceAdapter] | None = None,
     gmail_factory: Callable[[], GmailAdapter] | None = None,
+    live_gmail_factory: Callable[[GmailAdapter], LiveGmail] | None = None,
     search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
     chat_factory: Callable[[Settings, LocalArchive, Callable[[str], None]], ChatSession]
     | None = None,
@@ -72,6 +80,7 @@ def run_application(
             stdout,
             search_factory=search_factory,
             chat_factory=chat_factory,
+            live_gmail_factory=live_gmail_factory,
         )
     except Exception as exc:
         if settings.debug:
@@ -89,6 +98,7 @@ def run_cli(
     stdout: TextIO,
     *,
     search_factory: Callable[[Settings, SQLiteArchive], SearchBackend] | None = None,
+    live_gmail_factory: Callable[[GmailAdapter], LiveGmail] | None = None,
     chat_factory: Callable[[Settings, LocalArchive, Callable[[str], None]], ChatSession]
     | None = None,
 ) -> int:
@@ -141,6 +151,12 @@ def run_cli(
             else:
                 search_backend = search_factory(settings, archive)
         return search_backend
+
+    def get_chat_archive() -> LocalArchive:
+        backend = get_search_backend()
+        if not isinstance(backend, LocalArchive):
+            raise ChatError("The search backend does not support local document context.")
+        return backend
 
     stdout.write("Ask a question about your local archive. Type /help for commands.\n")
     while True:
@@ -226,20 +242,19 @@ def run_cli(
                         stdout.flush()
 
                     model = openrouter_model(settings) if chat_factory is None else None
-                    backend = get_search_backend()
-                    if not isinstance(backend, LocalArchive):
-                        raise ChatError(
-                            "The search backend does not support local document context."
-                        )
                     if chat_factory is not None:
-                        chat = chat_factory(settings, backend, notify)
+                        chat = chat_factory(settings, get_chat_archive(), notify)
                     else:
                         chat = ChatSession(
                             settings,
-                            backend,
+                            get_chat_archive,
                             model=model,
                             notify=notify,
-                            gmail=gmail,
+                            gmail=(
+                                live_gmail_factory(gmail)
+                                if live_gmail_factory is not None
+                                else GmailMCPAdapter(gmail.status)
+                            ),
                         )
                 stdout.write(chat.ask(command) + "\n")
             except ChatError as exc:

@@ -78,7 +78,10 @@ class ChatTests(TestCase):
                 stderr=StringIO(),
                 services_factory=lambda settings: AvailableServices(),
                 gmail_factory=lambda: gmail,
-                search_factory=lambda settings, archive: self.index,
+                live_gmail_factory=lambda adapter: adapter,
+                search_factory=lambda settings, archive: self.fail(
+                    "Live-only chat must not initialize local retrieval services"
+                ),
             )
         self.assertEqual(code, 0)
         self.assertIn("Live Gmail: Quarterly report [message:message-1]", stdout.getvalue())
@@ -104,6 +107,7 @@ class ChatTests(TestCase):
                 stderr=StringIO(),
                 services_factory=lambda settings: AvailableServices(),
                 gmail_factory=lambda: gmail,
+                live_gmail_factory=lambda adapter: adapter,
                 search_factory=lambda settings, archive: self.index,
             )
         self.assertEqual(code, 0)

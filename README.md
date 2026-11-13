@@ -166,11 +166,16 @@ the persistent archive. If Gmail is unavailable, local answers remain usable and
 that live coverage could not be checked. Selected live correspondence is sent to OpenRouter
 as tool evidence, just like selected local passages.
 
-The live tools reuse the read-only `gmail-agent` adapter, not a separate MCP server process.
-Verified installed interfaces: gmail-agent 0.3.1 (`search`, `message`, `thread` JSON output;
-`--max-chars 0` for complete message/thread bodies) and pydantic-ai-slim 1.107.10
-(`Agent.tool`, dynamic instructions, and shared per-investigation tool limits).
-Automated tests use a controlled model and Gmail adapter; they verify tool execution and
+Live chat tools use `gmail-agent mcp --read-only` over stdio. Only search, message, and
+thread reads are exposed to the agent. Each read starts and closes its MCP session;
+local embedding and index initialization are deferred until a local tool is used.
+Verified installed interfaces: gmail-agent 0.3.1, MCP SDK 2.3.0 (`ClientSession`, stdio,
+structured tool results), and pydantic-ai-slim 1.107.10 (`Agent.tool`, dynamic instructions,
+shared investigation limits). Complete reads pass `max_body_chars=0`.
+Pydantic AI's bundled MCP client currently fails to import with the installed MCP 2.3.0
+(`RequestContext` was removed), so these tools use the official MCP SDK directly.
+Tests exercise the real gmail-agent MCP server with a synthetic Gmail client over stdio,
+plus CLI flows with a controlled model and Gmail adapter. They verify tool execution and
 policy instructions, not real-model source-selection reliability or live-account acceptance.
 
 The CLI/application tests use controlled service adapters and do not require Docker or secrets:

@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import subprocess
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Protocol, cast
+
+from mcp import ClientSession, StdioServerParameters, types
+from mcp.client.stdio import stdio_client
 
 READONLY_LEVEL = "readonly"
 ReadCommand = Literal["search", "message", "thread"]
@@ -46,7 +52,19 @@ class GmailStatus:
     problem: str | None = None
 
 
-class GmailAdapter(Protocol):
+class LiveGmail(Protocol):
+    """Read-only live evidence, independent of deterministic ingestion."""
+
+    def status(self) -> GmailStatus: ...
+
+    def search_messages(self, query: str) -> object: ...
+
+    def get_message(self, message_id: str) -> object: ...
+
+    def get_thread(self, thread_id: str) -> object: ...
+
+
+class GmailAdapter(LiveGmail, Protocol):
     """Read-only Gmail operations exposed to the application."""
 
     def ensure_authenticated(self) -> GmailStatus:
@@ -72,6 +90,7 @@ class GmailAdapter(Protocol):
 
     def get_thread(self, thread_id: str) -> object:
         """Retrieve one Gmail conversation."""
+
 
 class GmailAgentAdapter:
     """Adapter for the open-source gmail-agent integration."""
@@ -187,6 +206,73 @@ class GmailAgentAdapter:
         if result.returncode != 0:
             raise GmailAccessError(_safe_error(payload, operation))
         return payload
+
+
+class GmailMCPAdapter:
+    """Read live evidence through gmail-agent's read-only MCP stdio server.
+
+    Each read owns its subprocess/session so failed reads cannot leak server processes.
+    Credentials and read-only status checks remain shared with deterministic ingestion.
+    """
+
+    def __init__(
+        self,
+        status: Callable[[], GmailStatus],
+        *,
+        server: StdioServerParameters | None = None,
+    ) -> None:
+        self.status = status
+        self.server = server or StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "gmail_agent", "mcp", "--read-only"],
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+
+    def search_messages(self, query: str) -> object:
+        return asyncio.run(self._call("search_messages", {"query": query}))
+
+    def get_message(self, message_id: str) -> object:
+        return asyncio.run(
+            self._call(
+                "get_message",
+                {
+                    "message_id": message_id,
+                    "max_body_chars": 0,
+                },
+            )
+        )
+
+    def get_thread(self, thread_id: str) -> object:
+        return asyncio.run(
+            self._call(
+                "get_thread",
+                {
+                    "thread_id": thread_id,
+                    "max_body_chars": 0,
+                },
+            )
+        )
+
+    async def _call(self, name: str, arguments: dict[str, object]) -> object:
+        # Never copy server stderr (which may contain correspondence) into the terminal.
+        try:
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with (
+                    stdio_client(self.server, errlog=errlog) as (read, write),
+                    ClientSession(read, write, read_timeout_seconds=30) as session,
+                ):
+                    await session.initialize()
+                    result = await session.call_tool(name, arguments)
+        except Exception:
+            raise GmailAccessError("Gmail MCP read failed; live coverage is unavailable") from None
+        if not isinstance(result, types.CallToolResult) or result.is_error:
+            raise GmailAccessError("Gmail MCP read failed; live coverage is unavailable")
+        if result.structured_content is not None:
+            return result.structured_content
+        for content in result.content:
+            if isinstance(content, types.TextContent):
+                return json.loads(content.text)
+        raise GmailAccessError("Gmail MCP returned no evidence")
 
 
 def _run_command(command: list[str], capture_output: bool) -> CompletedProcess[str]:

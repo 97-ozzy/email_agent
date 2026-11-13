@@ -15,6 +15,7 @@ dependencies = [
     "docx2txt>=0.9",
     "email-reply-parser>=0.5.12",
     "gmail-agent>=0.3.0,<0.4",
+    "mcp>=2.3,<3",
     "llama-index-core>=0.14",
     "llama-index-embeddings-fastembed==0.7.0",
     "fastembed==0.9.1",
