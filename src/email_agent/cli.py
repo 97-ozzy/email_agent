@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import sys
@@ -42,12 +43,6 @@ HELP_TEXT = """Supported commands:
   /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
   /sync_new  Import Inbox/Sent mail newer than the newest archived message
   /sync_old N  Import the next N messages older than the oldest archived message
-  /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
-                [--source email|attachment] [--filename NAME] [--type pdf|docx|text|email]
-            Search the persistent local hybrid index
-  /gmail-search QUERY  Search live Gmail
-  /gmail-message ID    Open one live Gmail message
-  /gmail-thread ID     Open one live Gmail conversation
   /reindex Rebuild email and attachment vectors from local content without contacting Gmail
   /exit    Exit the application
 """
@@ -67,6 +62,8 @@ def run_application(
     | None = None,
 ) -> int:
     """Validate configuration and run the interactive application."""
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     try:
         settings = Settings.from_environ(environ)
     except ConfigurationError as exc:
@@ -318,7 +315,7 @@ def run_cli(
                                     else GmailMCPAdapter(gmail.status)
                                 ),
                             )
-                    stdout.write(chat.ask(command) + "\n")
+                    stdout.write(_hide_email_ids(chat.ask(command)) + "\n")
                 except ChatError as exc:
                     stdout.write(f"{exc}\n")
                 except Exception:
@@ -400,9 +397,7 @@ def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
         stdout.write(f"{result.text}\n")
         stdout.write(
             f"document_id: {result.document_id}\n"
-            f"gmail_message_id: {result.gmail_message_id}\n"
-            f"thread_id: {result.thread_id}\n"
-            f"source_type: {result.source_type}\n"
+                        f"source_type: {result.source_type}\n"
             f"title: {result.title}\n"
             f"timestamp: {result.timestamp}\n"
             f"sender: {result.sender}\n"
@@ -413,7 +408,6 @@ def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
             stdout.write(f"chunk_id: {result.chunk_id}\nchunk_index: {result.chunk_index}\n")
         if result.filename is not None:
             stdout.write(
-                f"attachment_id: {result.attachment_id}\n"
                 f"filename: {result.filename}\n"
                 f"mime_type: {result.mime_type}\n"
                 f"document_type: {result.document_type}\n"
@@ -422,9 +416,6 @@ def _write_search_results(stdout: TextIO, results: list[SearchResult]) -> None:
             if result.page_number is not None:
                 stdout.write(f"page_number: {result.page_number}\n")
             stdout.write(
-                "sources: "
-                + json.dumps([asdict(source) for source in result.sources], ensure_ascii=False)
-                + "\n"
             )
 
 
@@ -481,7 +472,7 @@ def _try_write_gmail_result(
     except GmailAccessError as exc:
         stdout.write(f"Gmail unavailable: {exc}\n")
     else:
-        stdout.write(json.dumps(result, indent=2, ensure_ascii=False))
+        stdout.write(json.dumps(_hide_ids(result), indent=2, ensure_ascii=False))
         stdout.write("\n")
 
 
@@ -558,3 +549,23 @@ def main() -> None:
             stderr=sys.stderr,
         )
     )
+
+
+def _hide_ids(value: object) -> object:
+    """Remove provider message/thread/attachment IDs from user-facing command output."""
+    hidden = {"id", "message_id", "thread_id", "gmail_message_id", "attachment_id",
+              "document_id", "chunk_id", "occurrence_id"}
+    if isinstance(value, dict):
+        return {key: _hide_ids(item) for key, item in value.items() if key.lower() not in hidden}
+    if isinstance(value, list):
+        return [_hide_ids(item) for item in value]
+    return value
+
+
+def _hide_email_ids(text: str) -> str:
+    """Hide citation IDs from chat display while leaving the model's answer/history intact."""
+    import re
+
+    text = re.sub(r"\[(message|thread):[^\]]+\]", r"[\1]", text)
+    text = re.sub(r"\s+(?:attachment|chunk):[^]\s]+", "", text)
+    return text

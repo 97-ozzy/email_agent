@@ -236,14 +236,10 @@ class SearchCliTests(TestCase):
         for value in (
             "The invoice total is 42 EUR.",
             "0.875",
-            "email:message-1",
-            "message-1",
-            "thread-1",
             "email",
             "November invoice",
             "2026-11-12T10:30:00+00:00",
             "Alice <alice@example.com>",
-            "https://mail.google.com/mail/u/0/#all/message-1",
         ):
             self.assertIn(value, output)
 
@@ -271,7 +267,6 @@ class SearchCliTests(TestCase):
 
         source = AttachmentReference(
             1,
-            "gmail-attachment",
             "message",
             "thread",
             "report.pdf",
@@ -314,15 +309,16 @@ class SearchCliTests(TestCase):
         )
         for value in (
             "attachment:stable",
-            "gmail-attachment",
             "report.pdf",
             "application/pdf",
             "characters: 0:14",
-            '"occurrence_id": 1',
             '"content_path": "local.pdf"',
         ):
             self.assertIn(value, output)
         self.assertNotIn("page_number:", output)
+        self.assertNotIn("message", output)
+        self.assertNotIn("thread", output)
+        self.assertNotIn("gmail-attachment", output)
 
 
 class HybridRetrievalTests(TestCase):

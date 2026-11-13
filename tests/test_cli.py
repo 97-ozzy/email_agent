@@ -237,7 +237,9 @@ class InteractiveCliTests(TestCase):
         self.assertEqual(gmail.thread_ids, ["thread-1"])
         self.assertIn('"subject": "Quarterly report"', stdout.getvalue())
         self.assertIn('"body": "Message body"', stdout.getvalue())
-        self.assertIn('"id": "thread-1"', stdout.getvalue())
+        self.assertNotIn('"id": "thread-1"', stdout.getvalue())
+        self.assertNotIn("message-1", stdout.getvalue())
+        self.assertNotIn("thread-1", stdout.getvalue())
 
     def test_gmail_read_failure_is_actionable_and_cli_remains_available(self) -> None:
         services = ControlledServices(ServiceStatus(True, True, True))
@@ -276,6 +278,10 @@ class InteractiveCliTests(TestCase):
         self.assertIn("Qdrant: available", output)
         self.assertIn("FastEmbed: unavailable", output)
         self.assertIn("Goodbye.", output)
+        self.assertNotIn("/search", output)
+        self.assertNotIn("/gmail-search", output)
+        self.assertNotIn("/gmail-message", output)
+        self.assertNotIn("/gmail-thread", output)
 
     def test_status_distinguishes_each_unavailable_service(self) -> None:
         services = ControlledServices(ServiceStatus(False, True, True))
