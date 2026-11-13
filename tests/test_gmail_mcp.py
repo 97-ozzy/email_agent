@@ -89,7 +89,11 @@ class GmailMCPTests(TestCase):
                 search_factory=lambda settings, archive: self.fail("Local RAG unavailable"),
             )
             self.assertEqual(code, 0)
-            self.assertIn("45 EUR [message:live-id] [thread:live-thread]", stdout.getvalue())
+            self.assertIn(
+                "45 EUR https://mail.google.com/mail/u/0/#all/live-id"
+                " https://mail.google.com/mail/u/0/#all/live-thread",
+                stdout.getvalue(),
+            )
             self.assertEqual(SQLiteArchive(Path(directory)).completed_message_ids(), set())
 
     def test_real_stdio_search_message_and_complete_thread(self) -> None:

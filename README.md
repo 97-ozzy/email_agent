@@ -1,254 +1,283 @@
-# Email Agent
+﻿# Email Agent
 
-Email Agent is a local, read-only email AI agent. It provides a configurable CLI, local
-Qdrant/FastEmbed diagnostics, live read-only Gmail access, local archive ingestion, and
-conversational search over archived emails and attachments.
+Консольный AI-помощник для Gmail: находит письма и вложения, отвечает на вопросы о переписке и помогает восстановить контекст обсуждения.
 
-## Requirements
+Примеры вопросов:
 
-- Python 3.11 or 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Docker with Docker Compose
+- «Найди последний счёт от поставщика и условия оплаты».
+- «О чём договорились с Иваном по срокам проекта?»
+- «Проверь, не пришёл ли новый ответ по этому вопросу».
 
-## Install
+Агент работает **только на чтение**: не отправляет письма, не создаёт черновики, не удаляет сообщения и не меняет ярлыки. Интерфейс — терминал; отдельного веб-приложения нет.
 
-Create a reproducible environment from the checked-in lockfile:
+## Как это устроено
 
-```shell
-uv sync --locked
-```
+1. **Gmail** — источник писем. Подключение через `gmail-agent` и авторизацию Google в браузере.
+2. **Локальный архив** — сохранённые письма, вложения и база SQLite в папке `data/`.
+3. **Поиск** — Qdrant хранит индекс, а FastEmbed строит представления текста локально на CPU. Поиск сочетает смысловое сходство и ключевые слова (BM25).
+4. **AI-ответы** — модель через OpenRouter получает вопрос и найденные фрагменты, при необходимости читает актуальные письма напрямую из Gmail.
 
-Copy `.env.example` to `.env`, replace the placeholder values, then export those settings in
-your shell. The application reads environment variables directly and never reads or commits the
-`.env` file itself.
+**Локальный архив не означает полностью локальный AI:** OpenRouter получает вопрос, историю текущего диалога и выбранные фрагменты писем и вложений. Исходные файлы и поисковый индекс хранятся локально. Запросы к модели могут расходовать баланс OpenRouter.
 
-PowerShell example:
+## Что понадобится
+
+- **Python 3.11 или 3.12**. Python 3.13+ не поддерживается зависимостями проекта.
+- **uv** для установки Python-зависимостей и запуска команд.
+- **Docker с Docker Compose** для Qdrant. На Windows можно использовать Docker Desktop; он должен быть запущен.
+- Аккаунт Gmail и возможность настроить Google OAuth для доступа к почте.
+- Ключ OpenRouter и ID модели, которая поддерживает вызов инструментов (`tools`).
+- Интернет для установки зависимостей, первого скачивания модели, Gmail и OpenRouter.
+- Место на диске: около **2,38 ГБ только для модели поиска**, дополнительно — зависимости, письма, вложения и индекс.
+
+Приложение запускается на компьютере через `uv`; Docker запускает базу Qdrant. GPU и отдельный сервер эмбеддингов не нужны.
+
+## Первый запуск
+
+Ниже команды для **Windows PowerShell**. Выполняйте их из корня скачанного или клонированного проекта — папки с `pyproject.toml` и `compose.yaml`.
+
+### 1. Проверьте инструменты и установите зависимости
 
 ```powershell
-$env:OPENROUTER_API_KEY = "your-key"
-$env:OPENROUTER_MODEL = "openai/gpt-4.1-mini"
+uv --version
+docker compose version
+uv sync --locked --python 3.12
 ```
 
-`OPENROUTER_API_KEY` and `OPENROUTER_MODEL` are required. The local service URLs and the
-`Qwen/Qwen3-Embedding-0.6B` embedding model have defaults documented in `.env.example`.
+`uv` создаст виртуальное окружение `.venv` и установит версии из `uv.lock`. Активировать окружение вручную не нужно: все команды ниже используют `uv run`.
 
-## Local infrastructure
+### 2. Создайте настройки
 
-Start or stop Qdrant with:
+Если `.env` ещё нет:
 
-```shell
+```powershell
+Copy-Item .env.example .env
+```
+
+Откройте `.env` в редакторе и заполните как минимум:
+
+```dotenv
+OPENROUTER_API_KEY=ваш-ключ-openrouter
+OPENROUTER_MODEL=идентификатор-модели-с-поддержкой-tools
+```
+
+Укажите реальный ID выбранной модели из OpenRouter. Поле `OPENROUTER_MODEL` в `.env.example` — пример конфигурации; доступность модели и поддержку инструментов приложение проверяет при первом вопросе.
+
+Остальные настройки для первого запуска можно оставить как в примере. В частности, `EMAIL_AGENT_INITIAL_IMPORT_LIMIT=10` ограничивает первый импорт десятью письмами.
+
+**`.env` загружается автоматически при старте CLI.** Если одноимённая переменная уже задана в окружении терминала, она имеет приоритет над `.env`. После изменения настроек перезапустите приложение. Не добавляйте ключи и `.env` в Git.
+
+### 3. Запустите Qdrant
+
+```powershell
 docker compose up -d
-docker compose down
+docker compose ps
 ```
 
-Named `qdrant_data` volume retains indexes across normal container
-restarts and `docker compose down`. To deliberately remove all service data, run
-`docker compose down --volumes`.
+Контейнер `qdrant` должен быть в состоянии `Up` / `running`. Адрес для приложения по умолчанию — `http://localhost:6333`.
 
-## Run the CLI
+### 4. Запустите помощника и подключите Gmail
 
-```shell
+```powershell
 uv run --locked email-agent
 ```
 
-On the first run, the application delegates Gmail authorization to the open-source
-[`gmail-agent`](https://github.com/dremok/gmail-agent) integration. Its setup opens the Google
-Cloud and OAuth pages in your browser and always requests the `gmail.readonly` scope. If an OAuth
-client is already installed but its login is missing or expired, a read-only browser login starts
-instead. Later runs reuse the saved token and refresh it when possible.
+При первом подключении приложение запускает мастер `gmail-agent`. Следуйте его подсказкам: он поможет настроить проект Google Cloud, OAuth-клиент и вход через браузер. Доступ запрашивается со scope `gmail.readonly`.
 
-`gmail-agent` stores its OAuth client and token outside this repository in its user configuration
-directory (normally `~/.config/gmail-agent`). It writes the directory and token with owner-only
-permissions. Treat both files as secrets and never copy them into the project. To inspect the
-login without printing credentials, run `uv run --locked gmail-agent status`.
+Если хотите пройти настройку отдельно до запуска приложения:
 
-Startup reports Gmail, Qdrant and FastEmbed separately. A Gmail failure does not hide local-service
-status. On the first authenticated run, the application imports the newest 100 unique messages
-from the combined Inbox and Sent scope. Set `EMAIL_AGENT_INITIAL_IMPORT_LIMIT` to a value from 1
-through 100 for a smaller import, use `EMAIL_AGENT_DATA_DIR` to choose the archive directory,
-and set `EMAIL_AGENT_ATTACHMENT_MAX_BYTES` to cap text extraction by attachment byte size
-(default: 20971520). The data directory defaults to `data`. Complete message bodies are stored
-under that directory and metadata plus
-ingestion/indexing state are stored in `archive.sqlite3`. Later starts reuse completed records
-without downloading them again. If an import is partial, the CLI reports actual counts and keeps
-the completed records usable.
-
-FastEmbed downloads the exact FP32 Qwen3 ONNX model (~2.38 GB) on first search/reindex into data/models. Startup/status do not load model weights.
-
-Interactive commands currently available:
-
-- `/help` — list supported commands
-- `/clear` - reset in-memory conversation history without changing the archive or index
-- `/status` - refresh Gmail, Qdrant, FastEmbed, and embedding-model diagnostics
-- `/sync_new` - import mail newer than the newest archived message
-- `/sync_old N` - import the next N messages older than the oldest archived message
-- `/gmail-search QUERY` - search live Gmail using Gmail search syntax
-- `/gmail-message ID` - retrieve one complete live Gmail message
-- `/gmail-thread ID` - retrieve one live Gmail conversation
-- `/exit` — leave cleanly
-
-The application exposes no Gmail send, draft, delete, archive, or label-modification command.
-If an existing `gmail-agent` login has a broader access level, startup replaces it with a new
-read-only authorization before Gmail becomes available.
-
-### Synchronizing the archive
-
-Run `/sync_new` to download all Inbox/Sent messages newer than the newest dated message
-in the archive. Run `/sync_old N` to download the next N previously unarchived messages
-older than the oldest dated message, working backward from that boundary. N must be a
-positive integer; known IDs do not consume the limit. Repeat `/sync_old N` to extend the
-archive further into the past. Both modes paginate and overlap the boundary second to
-include unseen messages sharing a timestamp. With an empty archive, both start at the
-newest available mail, with the N limit still applied to `/sync_old N`.
-The former `/sync` command is removed. Completed content is reused, unfinished attachment
-work is retried, and Gmail moves, relabeling, or deletion never remove local sources.
-Time bounds use Gmail's epoch-second query format, documented in the
-[Gmail filtering guide](https://developers.google.com/workspace/gmail/api/guides/filtering).
-
-Sync reports unique discovered messages, downloaded and processed messages, skipped known IDs,
-and discovery/download failures. Attachment counts report downloads, parsed occurrences,
-unsupported files, oversized files, and failures. The separate index count reports changed
-documents (emails plus deduplicated attachment documents) and indexed attachment documents,
-not attachment occurrences or chunks.
-Duplicate IDs across discovery pages are counted once. An unchanged, fully indexed archive
-reports zero downloads, processing, and indexing work.
-
-Sync refreshes the active FastEmbed Qwen3 index even when every Gmail ID is already known.
-An embedding-contract change rebuilds vectors from archived email and attachment text and preserves
-the previous collection. As with search/reindex, the first sync may download the embedding model.
-If indexing fails, archived sources remain available for retry through `/sync_new` or `/search`;
-the CLI reports incomplete indexing instead of a successful index count.
-
-### Chat with local and live email evidence
-
-Type a natural-language question at the prompt. Pydantic AI uses `OPENROUTER_MODEL` through
-OpenRouter and can choose local search/context tools, live Gmail search, complete messages,
-or complete threads. Recent changes are checked live; older correspondence outside the
-archive can also be read live. The first question checks credentials and the model's
-advertised tool support. Local embedding and index initialization are deferred until a local
-tool is used. Provider routing requires support for the requested parameters. Errors leave the
-terminal commands available.
-
-Answers are instructed to cite messages as `[message:ID]`, with attachment IDs, filenames,
-and chunk IDs for attachment claims; identify conflicting evidence; and disclose missing evidence.
-Answers identify local-index versus live Gmail evidence and cite message/thread IDs.
-Local search covers only the archived subset. Live reads stay in the in-memory conversation
-and do not expand the persistent archive. If Gmail is unavailable, local answers remain usable
-and disclose that live coverage could not be checked.
-Email and attachment contents are treated as untrusted source data, including embedded instructions.
-Retrieval scores are relevance rankings, not probabilities that a claim is true.
-
-`EMAIL_AGENT_TOOL_CALL_LIMIT` defaults to 10 actual local/live tool calls per question. When exhausted,
-the agent receives no further retrieval tools and the CLI adds a partial-answer notice.
-If final synthesis fails after that limit, cited source excerpts remain available as a fallback.
-A separate bounded model-request budget prevents repeated invalid tool requests from looping.
-Tool notifications print only tool names, without arguments, correspondence, or private reasoning.
-The last ten complete exchanges, including paired tool calls and replies, stay in memory until
-`/clear` or exit; conversation history is never written to disk.
-
-OpenRouter receives the question, retained conversation, and selected retrieved email/attachment
-passages. Source files and the vector index remain local. Controlled-model tests exercise the
-real local archive/index with mocked embeddings and local Qdrant; they verify orchestration and
-policy delivery, and do not establish live-model answer quality or universal injection resistance.
-
-Live chat tools use `gmail-agent mcp --read-only` over stdio. Only search, message, and
-thread reads are exposed to the agent. Each read starts and closes its MCP session.
-Verified installed interfaces: gmail-agent 0.3.1, MCP SDK 2.3.0 (`ClientSession`, stdio,
-structured tool results), and pydantic-ai-slim 1.107.10 (`Agent.tool`, dynamic instructions,
-shared investigation limits). Complete reads pass `max_body_chars=0`.
-Pydantic AI's bundled MCP client currently fails to import with the installed MCP 2.3.0
-(`RequestContext` was removed), so these tools use the official MCP SDK directly.
-Tests exercise the real gmail-agent MCP server with a synthetic Gmail client over stdio,
-plus CLI flows with a controlled model and Gmail adapter. They verify tool execution and
-policy instructions, not real-model source-selection reliability or live-account acceptance.
-
-## Troubleshooting
-
-- A configuration error names every missing or invalid environment variable and exits without a
-  traceback.
-- If a service is unavailable, start it with `docker compose up -d` and use `/status` again.
-- If Gmail authorization is cancelled or rejected, follow the exact `gmail-agent setup` or
-  `gmail-agent login --scope readonly` command shown by `/status`.
-- If a personal OAuth app remains in Google Testing mode, its refresh token may expire after seven
-  days; publish the app for personal production use or repeat the read-only login.
-- Use `docker compose logs qdrant` to inspect container failures.
-- Set `EMAIL_AGENT_DEBUG=true` to allow detailed Python tracebacks while developing.
-
-## Tests
-
-### Local email search
-
-Run `/search QUERY` to index archived email bodies and extracted PDF, DOCX, and text attachments
-and retrieve passages using FastEmbed `Qwen/Qwen3-Embedding-0.6B`
-and FastEmbed BM25 with LlamaIndex's built-in relative-score fusion. Qdrant must be
-running. The first BM25 use downloads its small tokenizer resources.
-
-For example: `/search invoice --sender alice@example.com --after 2026-11-01 --before 2026-11-30
---limit 3 --source email`. Dates are inclusive UTC calendar dates; sender matches an email
-address. Results default to 8, with a range of 1–20. `EMAIL_AGENT_SEARCH_CONTEXT_TOKENS` bounds
-total passage text (default 6000 tokens), while source metadata remains complete. An optional
-additional character ceiling is available through `EMAIL_AGENT_SEARCH_CONTEXT_CHARS`.
-
-Index processing state and the LlamaIndex document store persist beneath the data directory;
-Qdrant uses the existing Compose volume. Changed sources replace old chunks. Original archived
-bodies remain intact. Search returns evidence directly without calling a generative model.
-Use `--source attachment`, `--filename "invoice.pdf"` (exact, case-sensitive original name),
-or `--type pdf|docx|text|email` to narrow results. Combined filename, sender, and date filters
-must match the same attachment occurrence. Identical bytes share one document; each result
-includes all archived message occurrences resolved from SQLite, including filenames, MIME
-types, Gmail attachment IDs, and paths to the retained files. The singular citation selects
-an occurrence matching the filters. Character ranges refer to persisted extracted text.
-PDF page numbers are omitted because the current full-document parser does not preserve
-trustworthy page boundaries. Reindexing reuses extracted text without downloading or parsing
-attachments again.
-
-### Running checks
-
-The CLI/application tests use controlled service adapters and do not require Docker or secrets:
-
-```shell
-$env:PYTHONPATH = "src"  # PowerShell
-python -m unittest discover -s tests -v
+```powershell
+uv run --locked gmail-agent setup --scope readonly
 ```
 
-### Qwen3 runtime and migration
+Если у вас уже есть JSON OAuth-клиента типа Desktop, его можно передать мастеру:
 
-Use Python 3.11 or 3.12 (`uv sync --python 3.12`). The official LlamaIndex FastEmbed
-adapter currently declares Python <3.13. Windows CPU inference requires ONNX Runtime and
-the Visual C++ runtime. No embedding server is needed.
+```powershell
+uv run --locked gmail-agent setup --scope readonly --client-file "C:\path\to\credentials.json"
+```
 
-`EMAIL_AGENT_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B` selects the exact FP32 model,
-1024 dimensions. Queries use Qwen's instruction format; documents stay unprefixed.
-Status means CPU/runtime and model registry support, not downloaded weights or tested inference.
+После успешного входа приложение импортирует последние письма из **Входящих и Отправленных**. Это выборка из двух папок вместе, а не вся история почтового ящика. Повторный запуск использует сохранённый архив и авторизацию.
 
-New embedding contracts use `email_agent_sources_<contract-hash>` and
-`data/index/<contract-hash>/docstore.json`. The legacy collection is preserved but never queried.
-Even equal-dimension model changes rebuild vectors from local bodies. Run
-`email-agent --reindex` to force a local email and attachment rebuild without Gmail access.
-Attachments and their extracted text remain preserved; indexing/rebuilding them is still
-assigned to Tickets 06/12. No unrelated future ticket is implemented here.
-See [compatibility evidence](docs/qwen-fastembed-compatibility.md) for real versus mocked checks.
+Признаки готовности: Gmail, Qdrant и FastEmbed показывают `available`, затем появляется приглашение `email-agent>`. Статус модели `supported` означает поддержку средой, а не то, что её веса уже скачаны.
 
-### Neighboring document context
+### 5. Задайте вопрос
 
-Search results expose `chunk_id` and zero-based `chunk_index`. Call
-`HybridSearchIndex.get_local_document(document_id, chunk_id=..., num_nodes=1)`
-or pass `chunk_index=...` instead of `chunk_id`. `num_nodes` accepts 0–2 per
-direction, defaulting to one previous and one next chunk. Results contain ordered
-chunks, source metadata, and authoritative attachment references. Unknown IDs,
-invalid requests, or incomplete derived nodes return a structured `error` with
-`code` and `message` and no chunks.
+Внутри приложения введите, например:
 
-`EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS` limits returned passage text to 3000 tokens
-by default. The target takes priority; only complete neighbors that fit are
-included. A target exceeding the whole budget is truncated and marked
-`truncated=True`. Citation metadata remains complete. Search does not automatically
-expand results. Expansion reads the active collection's local document store,
-without vector queries, embedding generation, or generative model calls.
-Document stores are derived data: rebuild from SQLite and preserved source text
-using `--reindex` if needed. See [compatibility notes](docs/document-context.md).
+```text
+Какие счета есть в последних письмах и что нужно оплатить?
+```
 
-### Optional Langfuse tracing
+Или проверьте поиск без генерации AI-ответа:
 
-See [local Langfuse setup and tracing](docs/langfuse-tracing.md) for the standard UI at
-http://localhost:3000, project keys, privacy controls, tested versions and validation limits.
+```text
+/search счёт на оплату
+```
+
+При первом обращении к локальному поиску скачивается модель `Qwen/Qwen3-Embedding-0.6B` (~2,38 ГБ), затем строится индекс. Это также может произойти при синхронизации или переиндексации. Первый запуск поиска займёт больше времени; последующие используют локальный кеш. BM25 отдельно скачивает небольшие ресурсы токенизатора.
+
+## Повторный запуск и остановка
+
+В PowerShell из корня проекта:
+
+```powershell
+docker compose up -d
+uv run --locked email-agent
+```
+
+Выйти из помощника — `/exit`. Остановить Qdrant после выхода:
+
+```powershell
+docker compose down
+```
+
+Обычный `down` сохраняет индекс в Docker volume `qdrant_data`; архив в `data/` также остаётся. Не добавляйте `--volumes`, если хотите сохранить данные Qdrant.
+
+На Linux/macOS последовательность та же; для создания `.env` используйте `cp .env.example .env`. Все команды `uv` и `docker compose` выше остаются прежними.
+
+## Команды внутри приложения
+
+Команды с `/` вводятся в `email-agent>`, а не в PowerShell.
+
+| Команда | Что делает |
+| --- | --- |
+| Обычный текст | Задаёт вопрос AI-помощнику о письмах и вложениях |
+| `/help` | Показывает краткую встроенную справку |
+| `/status` | Повторно проверяет Gmail, Qdrant, FastEmbed и поддержку модели поиска |
+| `/clear` | Очищает историю диалога в памяти |
+| `/sync_new` | Загружает письма новее самого нового письма в архиве и обновляет индекс |
+| `/sync_old N` | Загружает следующие `N` ещё не сохранённых писем старше самого старого в архиве и обновляет индекс |
+| `/search ЗАПРОС` | Ищет фрагменты в локальном архиве без генерации ответа |
+| `/reindex` | Перестраивает индекс из локальных писем и вложений |
+| `/gmail-search ЗАПРОС` | Ищет напрямую в Gmail с его синтаксисом запросов |
+| `/gmail-message ID` | Читает полное письмо из Gmail по его ID |
+| `/gmail-thread ID` | Читает цепочку писем из Gmail по её ID |
+| `/exit` | Завершает работу |
+
+Встроенная `/help` содержит сокращённый список; таблица выше включает дополнительные команды поиска и чтения.
+
+### Как пополнять архив
+
+```text
+/sync_new
+/sync_old 100
+```
+
+Повторяйте `/sync_old 100`, чтобы двигаться в прошлое порциями по 100 писем. В пустом архиве обе команды начинают с самых новых писем; `/sync_old N` сохраняет ограничение по количеству.
+
+Синхронизация охватывает Входящие и Отправленные. Уже сохранённые письма повторно не скачиваются; незавершённая обработка вложений повторяется. Перемещение или удаление письма в Gmail не удаляет локальную копию. Повторный запуск приложения сам по себе не заменяет `/sync_new`.
+
+Если индексирование завершилось ошибкой, скачанные письма сохраняются. После исправления проблемы повторите `/sync_new`, `/search` или `/reindex`.
+
+### Примеры поиска
+
+```text
+/search условия оплаты
+/search invoice --sender alice@example.com --limit 3
+/search договор --after 2026-11-01 --before 2026-11-30 --source email
+/search счёт --source attachment --type pdf
+/search оплата --filename "invoice.pdf"
+/gmail-search from:alice@example.com newer_than:7d
+```
+
+Фильтры `/search`:
+
+| Флаг | Значение |
+| --- | --- |
+| `--sender` | Email отправителя |
+| `--after`, `--before` | Даты в формате `YYYY-MM-DD`, включительно, по UTC |
+| `--limit` | От 1 до 20 результатов, по умолчанию 8 |
+| `--source` | `email` или `attachment` |
+| `--type` | `email`, `pdf`, `docx` или `text` |
+| `--filename` | Точное исходное имя вложения с учётом регистра |
+
+Поиск учитывает текст писем и извлечённый текст PDF, DOCX и текстовых вложений. Результаты — найденные фрагменты и сведения об источниках. Оценка `score` отражает релевантность, а не достоверность утверждения.
+
+Локальный поиск видит только загруженную часть почты. AI-помощник дополнительно может читать Gmail напрямую; такие чтения не добавляют письма в постоянный архив. Если Gmail недоступен, работа с уже сохранёнными данными остаётся возможной при доступности локального поиска и OpenRouter для AI-ответов.
+
+## Настройки
+
+Полный пример — [`.env.example`](.env.example). Основные параметры:
+
+| Переменная | Значение по умолчанию в коде | Назначение |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | Обязательна | Ключ для AI-запросов |
+| `OPENROUTER_MODEL` | Обязательна | ID модели с поддержкой инструментов |
+| `QDRANT_URL` | `http://localhost:6333` | Адрес Qdrant |
+| `EMAIL_AGENT_INITIAL_IMPORT_LIMIT` | `100` | Размер первого импорта, от 1 до 100; в `.env.example` задано `10` |
+| `EMAIL_AGENT_DATA_DIR` | `data` | Каталог архива, кеша модели и состояния поиска |
+| `EMAIL_AGENT_ATTACHMENT_MAX_BYTES` | `20971520` | Максимальный размер вложения для извлечения текста: 20 МиБ |
+| `EMAIL_AGENT_EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | Единственная поддерживаемая сейчас модель поиска |
+| `EMAIL_AGENT_SEARCH_CONTEXT_TOKENS` | `6000` | Бюджет текста результатов поиска |
+| `EMAIL_AGENT_SEARCH_CONTEXT_CHARS` | `1000000` | Дополнительное ограничение текста поиска по символам |
+| `EMAIL_AGENT_DOCUMENT_CONTEXT_TOKENS` | `3000` | Бюджет чтения соседних фрагментов документа |
+| `EMAIL_AGENT_TOOL_CALL_LIMIT` | `10` | Максимальное число вызовов инструментов на один AI-вопрос |
+| `EMAIL_AGENT_DEBUG` | `false` | Подробные Python traceback для диагностики |
+| `LANGFUSE_ENABLED` | `false` | Включение необязательной трассировки |
+
+Ключ и ID модели OpenRouter проверяются в настройках даже при запуске ради `/search` или переиндексации. Сам `/search` не вызывает генеративную модель.
+
+## Где хранятся данные
+
+```text
+data/
+  archive.sqlite3     # Метаданные писем и состояние обработки
+  messages/           # Сохранённые тексты писем
+  attachments/        # Скачанные вложения
+  extracted/          # Извлечённый текст вложений
+  models/             # Кеш модели поиска
+  index/              # Локальное хранилище документов для поиска
+```
+
+Векторы находятся отдельно в Docker volume `qdrant_data`. OAuth-клиент и токен Gmail хранятся в пользовательском каталоге `gmail-agent`, обычно `~/.config/gmail-agent`, вне репозитория.
+
+История последних десяти полных обменов в диалоге хранится в памяти до `/clear` или выхода. Она не записывается на диск. Файлы архива, OAuth-токены и ключи содержат приватные данные; не публикуйте их.
+
+Если индекс повреждён или его нужно перестроить, выполните из PowerShell:
+
+```powershell
+uv run --locked email-agent --reindex
+```
+
+Этот режим читает сохранённые письма и извлечённый текст вложений, не обращается к Gmail и не требует повторной загрузки писем. Qdrant должен быть запущен. Исходный архив сохраняется.
+
+## Частые проблемы
+
+| Симптом | Что проверить |
+| --- | --- |
+| `uv` или `docker` не найдены | Установите соответствующий инструмент, перезапустите терминал и повторите проверку версий |
+| Docker не запускает контейнер | Убедитесь, что Docker Desktop запущен; посмотрите `docker compose ps` и `docker compose logs qdrant` |
+| Порт `6333` занят | Проверьте другой экземпляр Qdrant; при смене порта в `compose.yaml` измените и `QDRANT_URL` в `.env` |
+| Ошибка обязательных настроек | Проверьте `.env` в корне проекта и заполнение `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` |
+| Изменения `.env` не применяются | Перезапустите приложение; проверьте, не заданы ли те же переменные в окружении терминала |
+| Gmail недоступен | Выполните `uv run --locked gmail-agent status`; для первичной настройки используйте `setup --scope readonly`, для повторного входа — `login --scope readonly` |
+| Первый поиск долго не отвечает | Дождитесь скачивания модели и индексации; проверьте интернет и свободное место |
+| Ошибка ONNX Runtime на Windows | Проверьте Python 3.11/3.12 и наличие Visual C++ Runtime |
+| OpenRouter отклоняет вопрос | Проверьте ключ, баланс, ID модели и поддержку `tools`; после исправления повторите вопрос |
+| Нужное старое письмо не находится | Расширьте архив через `/sync_old N` или попросите AI поискать напрямую в Gmail |
+| После `uv sync` ошибка доступа к `email-agent.exe` | Сначала завершите запущенное приложение через `/exit`, затем повторите установку |
+
+Для повторного входа в Gmail:
+
+```powershell
+uv run --locked gmail-agent login --scope readonly
+```
+
+## Разработка и дополнительная документация
+
+Основной код находится в `src/email_agent/`, тесты — в `tests/`, локальная инфраструктура — в `compose.yaml` и `infra/`.
+
+Запуск тестов в установленном окружении:
+
+```powershell
+uv run --locked python -m unittest discover -s tests -v
+```
+
+Основные тесты используют управляемые адаптеры и не требуют ключей Gmail/OpenRouter или Docker. Проверки с настоящей моделью и сервером Qdrant требуют отдельной подготовки; их ограничения описаны в документах совместимости.
+
+Дополнительные материалы:
+
+- [Langfuse: необязательная локальная трассировка и интерфейс на localhost:3000](docs/langfuse-tracing.md). Для обычного запуска не нужен; поднимается отдельным Compose-проектом.
+- [Модель Qwen3, совместимость FastEmbed и миграция индекса](docs/qwen-fastembed-compatibility.md).
+- [Поиск по вложениям и объединение источников](docs/unified-attachment-retrieval.md).
+- [Извлечение текста вложений](docs/attachment-reader-compatibility.md).
+- [Чтение соседних фрагментов документов](docs/document-context.md).

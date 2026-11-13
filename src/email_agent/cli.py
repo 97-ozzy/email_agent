@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import asdict
 from datetime import date
 from typing import TextIO
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -315,7 +316,9 @@ def run_cli(
                                     else GmailMCPAdapter(gmail.status)
                                 ),
                             )
-                    stdout.write(_hide_email_ids(chat.ask(command)) + "\n")
+                    stdout.write(
+                        _format_email_links(chat.ask(command), hyperlinks=stdout.isatty()) + "\n"
+                    )
                 except ChatError as exc:
                     stdout.write(f"{exc}\n")
                 except Exception:
@@ -562,10 +565,15 @@ def _hide_ids(value: object) -> object:
     return value
 
 
-def _hide_email_ids(text: str) -> str:
-    """Hide citation IDs from chat display while leaving the model's answer/history intact."""
-    import re
+def _format_email_links(text: str, *, hyperlinks: bool = False) -> str:
+    """Link source citations for display without modifying the model's answer/history."""
+    def link(match: re.Match[str]) -> str:
+        kind, source_id = match.group(1, 2)
+        url = "https://mail.google.com/mail/u/0/#all/" + quote(source_id, safe="")
+        if hyperlinks:
+            return f"\033]8;;{url}\033\\[{kind}]\033]8;;\033\\"
+        return url
 
-    text = re.sub(r"\[(message|thread):[^\]]+\]", r"[\1]", text)
+    text = re.sub(r"\[(message|thread):([^\s\]]+)[^\]]*\]", link, text)
     text = re.sub(r"\s+(?:attachment|chunk):[^]\s]+", "", text)
     return text

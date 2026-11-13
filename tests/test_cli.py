@@ -4,7 +4,7 @@ from io import StringIO
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 
-from email_agent.cli import run_application
+from email_agent.cli import _format_email_links, run_application
 from email_agent.config import Settings
 from email_agent.gmail import GmailAccessError, GmailStatus
 from email_agent.services import ServiceStatus
@@ -15,6 +15,28 @@ VALID_ENV = {
     "OPENROUTER_MODEL": "test/model",
     "EMAIL_AGENT_DATA_DIR": TEST_DATA_DIRECTORY.name,
 }
+
+
+class EmailLinksTests(TestCase):
+    def test_sources_link_to_gmail_in_plain_output(self) -> None:
+        self.assertEqual(
+            _format_email_links("Claim [message:abc]. Context [thread:def]."),
+            "Claim https://mail.google.com/mail/u/0/#all/abc. "
+            "Context https://mail.google.com/mail/u/0/#all/def.",
+        )
+
+    def test_attachment_citation_links_to_parent_message(self) -> None:
+        self.assertEqual(
+            _format_email_links("[message:abc attachment:att filename:report.pdf chunk:42]"),
+            "https://mail.google.com/mail/u/0/#all/abc",
+        )
+
+    def test_terminal_hyperlink_escapes_source_id(self) -> None:
+        self.assertEqual(
+            _format_email_links("[message:abc/def]", hyperlinks=True),
+            "\033]8;;https://mail.google.com/mail/u/0/#all/abc%2Fdef"
+            "\033\\[message]\033]8;;\033\\",
+        )
 
 
 class ControlledServices:

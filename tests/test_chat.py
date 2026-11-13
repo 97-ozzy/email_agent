@@ -84,7 +84,10 @@ class ChatTests(TestCase):
                 ),
             )
         self.assertEqual(code, 0)
-        self.assertIn("Live Gmail: Quarterly report [message:message-1]", stdout.getvalue())
+        self.assertIn(
+            "Live Gmail: Quarterly report https://mail.google.com/mail/u/0/#all/message-1",
+            stdout.getvalue(),
+        )
         self.assertEqual(gmail.searches, ["older report"])
         self.assertEqual(self.archive.completed_message_ids(), {"invoice"})
 
@@ -169,8 +172,15 @@ class ChatTests(TestCase):
         output = self.run_live_chat(
             model, UpdatedGmail(GmailStatus(True)), "What changed recently?"
         )
-        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
-        self.assertIn("45 EUR on 2026-11-13 [message:agreement] [thread:negotiation]", output)
+        self.assertIn(
+            "Local-index invoice: 42 EUR https://mail.google.com/mail/u/0/#all/invoice",
+            output,
+        )
+        self.assertIn(
+            "45 EUR on 2026-11-13 https://mail.google.com/mail/u/0/#all/agreement"
+            " https://mail.google.com/mail/u/0/#all/negotiation",
+            output,
+        )
         self.assertEqual(self.archive.completed_message_ids(), {"invoice"})
 
     def test_cli_local_answers_disclose_unavailable_live_coverage(self) -> None:
@@ -182,7 +192,10 @@ class ChatTests(TestCase):
         output = self.run_live_chat(
             model, ControlledGmail(GmailStatus(False)), "What is the total?"
         )
-        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn(
+            "Local-index invoice: 42 EUR https://mail.google.com/mail/u/0/#all/invoice",
+            output,
+        )
         self.assertIn("live coverage could not be checked", output)
 
     def test_cli_local_only_answer_does_not_read_live_mail(self) -> None:
@@ -194,7 +207,10 @@ class ChatTests(TestCase):
             return ModelResponse(parts=[TextPart("Local-index invoice: 42 EUR [message:invoice].")])
 
         output = self.run_live_chat(model, gmail, "What did the archived invoice say?")
-        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn(
+            "Local-index invoice: 42 EUR https://mail.google.com/mail/u/0/#all/invoice",
+            output,
+        )
         self.assertEqual(gmail.searches, [])
         self.assertEqual(gmail.message_ids, [])
         self.assertEqual(gmail.thread_ids, [])
@@ -268,7 +284,10 @@ class ChatTests(TestCase):
         output = self.run_live_chat(
             model, FailingGmail(GmailStatus(True)), "Any updated agreement?"
         )
-        self.assertIn("Local-index invoice: 42 EUR [message:invoice]", output)
+        self.assertIn(
+            "Local-index invoice: 42 EUR https://mail.google.com/mail/u/0/#all/invoice",
+            output,
+        )
         self.assertIn("live coverage could not be checked", output)
         self.assertNotIn("private token", output)
 
@@ -566,7 +585,7 @@ class ChatTests(TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(stdout.getvalue().count("Tool: search_email_rag"), 2)
         self.assertIn("Conversation history cleared", stdout.getvalue())
-        self.assertIn("42 EUR [message:invoice]", stdout.getvalue())
+        self.assertIn("42 EUR https://mail.google.com/mail/u/0/#all/invoice", stdout.getvalue())
         self.assertNotIn("Invoice total:", stdout.getvalue())
 
     def test_cli_search_and_reindex_preserve_chat_document_context(self) -> None:
@@ -616,7 +635,10 @@ class ChatTests(TestCase):
             ),
         )
         self.assertEqual(code, 0)
-        self.assertIn("Read full context: 42 EUR [message:invoice]", stdout.getvalue())
+        self.assertIn(
+            "Read full context: 42 EUR https://mail.google.com/mail/u/0/#all/invoice",
+            stdout.getvalue(),
+        )
 
 
 class ChatConfigurationTests(TestCase):
