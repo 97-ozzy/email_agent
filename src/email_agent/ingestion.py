@@ -45,10 +45,26 @@ def synchronize_messages(
     gmail: GmailAdapter,
     archive: SQLiteArchive,
     attachment_maximum_bytes: int = 20 * 1024 * 1024,
+    *,
+    old_limit: int | None = None,
 ) -> SyncReport:
-    """Scan all Inbox/Sent pages, retaining local sources and skipping completed IDs."""
+    """Discover newer mail, or the next bounded batch older than the archive."""
+    if old_limit is not None and old_limit < 1:
+        raise ValueError("/sync_old requires a positive integer")
+    oldest, newest = archive.message_time_bounds()
+    query = f"({IMPORT_QUERY})"
+    # Overlap the boundary second so equal timestamps cannot strand unseen IDs.
+    if old_limit is not None and oldest is not None:
+        query += f" before:{oldest + 1}"
+    elif old_limit is None and newest is not None:
+        query += f" after:{newest - 1}"
     pending_attachments = process_pending_attachments(gmail, archive, attachment_maximum_bytes)
-    selected, failures = _discover_messages(gmail, limit=None)
+    selected, failures = _discover_messages(
+        gmail,
+        limit=old_limit,
+        query=query,
+        excluded=archive.completed_message_ids() if old_limit is not None else None,
+    )
     report = _archive_messages(gmail, archive, selected, failures, attachment_maximum_bytes)
     return SyncReport(
         len(selected),
@@ -159,7 +175,11 @@ def retry_failed_messages(
 
 
 def _discover_messages(
-    gmail: GmailAdapter, limit: int | None
+    gmail: GmailAdapter,
+    limit: int | None,
+    *,
+    query: str = IMPORT_QUERY,
+    excluded: set[str] | None = None,
 ) -> tuple[list[dict[str, object]], int]:
     messages_by_id: dict[str, dict[str, object]] = {}
     page_token: str | None = None
@@ -169,7 +189,7 @@ def _discover_messages(
     while limit is None or len(messages_by_id) < limit:
         try:
             page = gmail.list_messages(
-                IMPORT_QUERY,
+                query,
                 max_results=100 if limit is None else min(100, max(1, limit - len(messages_by_id))),
                 page_token=page_token,
             )
@@ -183,6 +203,8 @@ def _discover_messages(
                 continue
             message_id = item.get("id")
             if isinstance(message_id, str) and message_id:
+                if excluded is not None and message_id in excluded:
+                    continue
                 messages_by_id.setdefault(message_id, cast(dict[str, object], item))
 
         next_token = page.get("next_page_token")

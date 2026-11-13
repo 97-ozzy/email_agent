@@ -61,7 +61,7 @@ The application:
 8. Reports actual download, processing, and indexing statistics.
 9. Opens an interactive chat and invites the user to ask a question about their email.
 
-Subsequent runs reuse existing local data. New messages are imported through the `/sync` command.
+Subsequent runs reuse existing local data. New messages are imported through the `/sync_new` command.
 
 ### High-level architecture
 
@@ -293,7 +293,7 @@ The ingestion pipeline operates independently of LLM reasoning.
 
 80. As a user, I want `/status` to show index statistics and service availability, so that I can inspect the current application state.
 
-81. As a user, I want `/sync` to import newly available Gmail messages, so that I can update the local knowledge base on demand.
+81. As a user, I want `/sync_new` to import newly available Gmail messages, so that I can update the local knowledge base on demand.
 
 82. As a user, I want `/search` to expose direct hybrid retrieval results, so that I can troubleshoot search behavior independently of agent reasoning.
 
@@ -311,7 +311,7 @@ The ingestion pipeline operates independently of LLM reasoning.
 
 88. As a user, I want synchronization to cover the selected Inbox and Sent scope, so that newly received and newly sent messages are both discoverable.
 
-89. As a user, I want `/sync` to retrieve all newly discovered messages rather than stopping after the initial import limit, so that the index can grow naturally.
+89. As a user, I want `/sync_new` to retrieve all newly discovered messages rather than stopping after the initial import limit, so that the index can grow naturally.
 
 90. As a user, I want interrupted indexing operations to resume, so that application crashes do not require restarting the entire import.
 
@@ -831,7 +831,8 @@ The supported commands are:
 |---|---|
 | `/help` | Display commands |
 | `/status` | Display index and service status |
-| `/sync` | Import newly discovered messages |
+| `/sync_new` | Import all messages newer than the newest archived message |
+| `/sync_old N` | Import the next N messages older than the oldest archived message |
 | `/search` | Execute hybrid search without the agent |
 | `/clear` | Clear current conversation history |
 | `/exit` | Exit the application |
@@ -858,7 +859,7 @@ Tool-call and tool-result message sequences must remain structurally valid when 
 
 ### 16. Synchronization
 
-For the MVP, synchronization is manual through `/sync`.
+For the MVP, synchronization is manual through `/sync_new` and `/sync_old N`.
 
 No background worker, webhook, Gmail Push Notifications, or Pub/Sub service is needed.
 
@@ -874,13 +875,23 @@ The synchronization workflow:
 8. Records successful completion.
 9. Displays results.
 
-Do not apply the initial 100-message limit to later synchronization.
+Do not apply the initial 100-message limit to `/sync_new`.
+
+`/sync_new` searches from the newest archived timestamp toward the present, without
+a message limit. `/sync_old N` retrieves up to N previously unarchived messages
+starting at the oldest archived timestamp and proceeding backward, newest first.
+N must be a positive integer. Known IDs do not consume this limit. Repeated
+`/sync_old N` calls extend the archive further into the past. Both modes use
+pagination in the Inbox/Sent scope. A one-second boundary overlap includes unseen
+messages with the same timestamp; known IDs are skipped. With no dated archived
+messages, both modes start at the newest available mail (`/sync_old N` remains capped).
+The former `/sync` command is removed.
 
 Previously downloaded messages should not be downloaded again unnecessarily.
 
 An overlapping range of already known messages may be examined to avoid missing newly discovered correspondence.
 
-Full historical backfill is not required.
+Historical backfill is manual and bounded through `/sync_old N`.
 
 Deletion and label changes in Gmail do not automatically delete local records.
 
@@ -1130,10 +1141,13 @@ Agent tests should allow for nondeterministic LLM behavior and assert the requir
 
 Verify:
 
-- `/sync` detects new messages.
+- `/sync_new` detects new messages.
+- `/sync_old N` loads at most N unknown messages before the oldest archived timestamp.
+- Repeated `/sync_old N` calls extend the archive backward, including equal-timestamp batches.
+- Empty archives start at the newest mail; invalid or missing N is rejected.
 - Previously indexed messages are not duplicated.
 - New attachments are processed.
-- A repeated `/sync` with no changes does not duplicate records.
+- A repeated `/sync_new` with no changes does not duplicate records.
 - Interrupted processing is recoverable.
 - Failed documents can be retried.
 - Existing archived messages remain locally available.
@@ -1147,7 +1161,7 @@ Verify:
 - Startup using an existing index.
 - `/help`.
 - `/status`.
-- `/sync`.
+- `/sync_new`.
 - `/search`.
 - `/clear`.
 - `/exit`.
@@ -1180,7 +1194,7 @@ The acceptance scenario is:
 9. Restart the application.
 10. Confirm local data is reused.
 11. Add or receive a new test email.
-12. Run `/sync`.
+12. Run `/sync_new`.
 13. Confirm the new message becomes searchable.
 
 ### 13. Prior Art in the Codebase
@@ -1257,7 +1271,7 @@ Unsupported attachments may still be downloaded and retained.
 - Webhooks.
 - Scheduled autonomous agent execution.
 - Persistent conversational memory across sessions.
-- Automated historical mailbox backfill beyond the initial import.
+- Automated historical mailbox backfill (manual `/sync_old N` is supported).
 - Automatic removal of locally stored data when Gmail messages are deleted.
 - Interactive deletion of individual stored messages.
 

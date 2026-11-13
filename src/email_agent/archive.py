@@ -132,6 +132,23 @@ class SQLiteArchive:
             )
             return {str(row[0]) for row in rows}
 
+    def message_time_bounds(self) -> tuple[int | None, int | None]:
+        """Return oldest/newest archived message timestamps as UTC epoch seconds."""
+        with closing(self._connect()) as database:
+            rows = database.execute(
+                "SELECT message_timestamp FROM messages WHERE ingestion_status='downloaded'"
+            )
+            timestamps = []
+            for (value,) in rows:
+                try:
+                    parsed = datetime.fromisoformat(value)
+                except ValueError:
+                    continue
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                timestamps.append(int(parsed.timestamp()))
+        return (min(timestamps), max(timestamps)) if timestamps else (None, None)
+
     def failed_message_ids(self) -> list[str]:
         """Return only message IDs that need another download attempt."""
         with closing(self._connect()) as database:

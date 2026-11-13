@@ -40,7 +40,8 @@ HELP_TEXT = """Supported commands:
   /help    Display supported commands
   /clear   Clear in-memory conversation history
   /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
-  /sync    Archive new Inbox/Sent messages and attachments and update the local index
+  /sync_new  Import Inbox/Sent mail newer than the newest archived message
+  /sync_old N  Import the next N messages older than the oldest archived message
   /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
                 [--source email|attachment] [--filename NAME] [--type pdf|docx|text|email]
             Search the persistent local hybrid index
@@ -194,7 +195,21 @@ def run_cli(
                 settings.embedding_model,
                 local_problem=local_problem,
             )
-        elif command == "/sync":
+        elif command.split()[0] in {"/sync_new", "/sync_old"}:
+            parts = command.split()
+            old_limit = None
+            try:
+                if parts[0] == "/sync_old":
+                    if len(parts) != 2 or not parts[1].isascii() or not parts[1].isdigit():
+                        raise ValueError("Usage: /sync_old N (positive integer)")
+                    old_limit = int(parts[1])
+                    if old_limit < 1:
+                        raise ValueError("Usage: /sync_old N (positive integer)")
+                elif len(parts) != 1:
+                    raise ValueError("Usage: /sync_new")
+            except ValueError as exc:
+                stdout.write(f"Sync error: {exc}\n")
+                continue
             current_gmail = _checked_gmail_status(gmail.status)
             if not current_gmail.available:
                 stdout.write(
@@ -204,7 +219,9 @@ def run_cli(
             stdout.write("Sync: discovering Inbox and Sent messages...\n")
             stdout.flush()
             try:
-                sync_report = synchronize_messages(gmail, archive, settings.attachment_max_bytes)
+                sync_report = synchronize_messages(
+                    gmail, archive, settings.attachment_max_bytes, old_limit=old_limit
+                )
                 stdout.write(
                     f"Sync: discovered {sync_report.discovered}, "
                     f"downloaded {sync_report.downloaded}, processed {sync_report.processed}, "
@@ -228,7 +245,7 @@ def run_cli(
             except Exception:
                 stdout.write(
                     "Sync index failed: indexing incomplete; archived sources are preserved. "
-                    "Check local retrieval services and retry /sync or /search.\n"
+                    "Check local retrieval services and retry /sync_new or /search.\n"
                 )
         elif command == "/reindex":
             try:

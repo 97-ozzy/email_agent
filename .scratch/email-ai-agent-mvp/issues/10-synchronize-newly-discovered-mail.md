@@ -1,12 +1,14 @@
-# 10: Synchronize newly discovered mail
+# 10: Synchronize newer mail and bounded older batches
 
-**What to build:** A user can run `/sync` to add newly received and sent messages and their attachments to the local archive and search index without reprocessing completed records.
+**What to build:** A user can run `/sync_new` to add messages newer than the newest archived message, and `/sync_old N` to add the next N previously unarchived messages older than the oldest archived message and their attachments to the local archive and search index without reprocessing completed records.
 
 **Blocked by:** 06: Search attachments through unified retrieval
 
 **Status:** implemented
 
-- [x] Synchronization searches the Inbox and Sent scope with pagination and is not capped by the initial-import limit.
+- [x] Both commands paginate Inbox/Sent; `/sync_new` is uncapped and `/sync_old N` is capped by N unknown IDs.
+- [x] `/sync_new` starts at the newest archived timestamp; `/sync_old N` starts at the oldest and continues backward.
+- [x] Empty archives, equal timestamps, invalid N, and repeated historical batches are covered.
 - [x] Known Gmail message IDs are skipped without duplicate downloads, document records, chunks, or vector entries.
 - [x] New messages, attachment relationships, supported extracted text, and retrieval data become available through `/search` after synchronization.
 - [x] An overlapping discovery window may inspect known records to avoid missing new correspondence without reprocessing them.
@@ -19,17 +21,15 @@
 
 ## Comments
 
-Implemented 2026-11-13. `/sync` scans the full Inbox/Sent scope, deduplicates discovered IDs,
-reuses completed source records, retries unfinished attachment work, and refreshes the active
-hybrid index even when all message IDs are known. Full-scope discovery also archives previously
-unarchived older messages. Gmail moves, relabeling, or deletion never remove local sources.
-Reports distinguish message outcomes, attachment extraction outcomes, total indexed documents,
-and indexed attachment documents. Indexing failure preserves archived sources and CLI access.
+Updated 2026-11-13: replaced `/sync` with `/sync_new` and `/sync_old N`.
+New mail discovery starts at the newest archived timestamp and has no message cap.
+Historical discovery starts at the oldest archived timestamp and selects up to N
+unknown IDs, newest first, paginating past duplicates. Repeated historical calls
+extend the archive backward. Positive N is required. Empty/undated archives start
+at the newest mail. Both modes overlap the boundary second, retain local sources,
+retry unfinished attachments, and refresh the active embedding contract.
 
-Seven sync tests cover uncapped pagination, received/sent mail, known overlap, retained local
-sources, searchable attachments, zero-work repeats, download/attachment retries, repeated page
-tokens, indexing failure, and active-contract rebuilds of email and attachment documents.
-Tests use controlled Gmail/embeddings and local Qdrant on Windows, Python 3.12.14; no live Gmail
-or downloaded-Qwen/server-Qdrant acceptance is claimed. Standards and spec reviews have no
-remaining findings. Strict mypy and Ruff pass.
-The full suite ran 108 tests successfully (one skipped: downloaded-Qwen/server-Qdrant acceptance).
+Validation: 111 tests ran successfully (one skipped: downloaded-Qwen/server-Qdrant
+acceptance); strict mypy and Ruff passed. New controlled-Gmail tests cover opposite
+time bounds, repeated bounded historical batches, equal timestamps, empty archives,
+and CLI argument validation. No live Gmail acceptance was performed.

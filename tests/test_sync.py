@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,7 +8,7 @@ from unittest import TestCase
 
 from qdrant_client import QdrantClient
 from test_attachments import AttachmentGmail, attachment
-from test_ingestion import PagedGmail, PartiallyFailingGmail, message
+from test_ingestion import PagedGmail, PartiallyFailingGmail, SyntheticGmail, message
 from test_search import AvailableServices, ControlledEmbedding, UnavailableAttachmentEmbedding
 
 from email_agent.archive import SQLiteArchive
@@ -18,7 +19,87 @@ from email_agent.retrieval import HybridSearchIndex
 from email_agent.search import SearchRequest
 
 
+class TemporalGmail(SyntheticGmail):
+    def list_messages(self, query: str, max_results: int, page_token: str | None = None) -> object:
+        self.discovery_calls.append((query, max_results, page_token))
+        selected = self.messages
+        for token in query.split():
+            if token.startswith(("after:", "before:")):
+                operator, value = token.split(":")
+                selected = [
+                    m
+                    for m in selected
+                    if (
+                        datetime.fromisoformat(str(m["date"])).timestamp() > int(value)
+                        if operator == "after"
+                        else datetime.fromisoformat(str(m["date"])).timestamp() < int(value)
+                    )
+                ]
+        start = int(page_token or "0")
+        end = start + min(max_results, 2)
+        return {
+            "messages": selected[start:end],
+            "next_page_token": str(end) if end < len(selected) else None,
+        }
+
+
 class SynchronizationTests(TestCase):
+    def test_cli_rejects_invalid_limits_and_removed_sync_command(self) -> None:
+        gmail = TemporalGmail([])
+        with TemporaryDirectory() as directory:
+            SQLiteArchive(Path(directory)).mark_initial_import_attempted()
+            output = StringIO()
+            run_application(
+                environ={
+                    "OPENROUTER_API_KEY": "key",
+                    "OPENROUTER_MODEL": "model",
+                    "EMAIL_AGENT_DATA_DIR": directory,
+                },
+                stdin=StringIO(
+                    "/sync_old\n/sync_old 0\n/sync_old -1\n/sync_old two\n"
+                    "/sync_old 2 extra\n/sync_new extra\n/sync\n/exit\n"
+                ),
+                stdout=output,
+                stderr=StringIO(),
+                gmail_factory=lambda: gmail,
+                services_factory=lambda settings: AvailableServices(),
+            )
+            self.assertEqual(output.getvalue().count("Usage: /sync_old N"), 5)
+            self.assertIn("Usage: /sync_new", output.getvalue())
+            self.assertIn("Unknown command: /sync.", output.getvalue())
+            self.assertEqual(gmail.discovery_calls, [])
+
+    def test_new_and_old_extend_opposite_archive_boundaries(self) -> None:
+        messages = [
+            message(str(i), body=f"Mail {i}", date=f"2020-01-0{i}T00:00:00+00:00")
+            for i in range(6, 0, -1)
+        ]
+        gmail = TemporalGmail(messages)
+        with TemporaryDirectory() as directory:
+            archive = SQLiteArchive(Path(directory))
+            archive.store_message(messages[2])  # January 4
+            archive.store_message(messages[3])  # January 3
+            newer = synchronize_messages(gmail, archive)
+            self.assertEqual(newer.downloaded, 2)
+            self.assertEqual(gmail.downloaded_ids, ["6", "5"])
+            older = synchronize_messages(gmail, archive, old_limit=1)
+            self.assertEqual(older.downloaded, 1)
+            self.assertEqual(gmail.downloaded_ids, ["6", "5", "2"])
+            synchronize_messages(gmail, archive, old_limit=1)
+            self.assertEqual(gmail.downloaded_ids, ["6", "5", "2", "1"])
+            self.assertEqual(synchronize_messages(gmail, archive).downloaded, 0)
+            self.assertEqual(synchronize_messages(gmail, archive, old_limit=2).downloaded, 0)
+
+    def test_old_empty_archive_is_capped_and_equal_timestamps_are_not_lost(self) -> None:
+        gmail = TemporalGmail([message(str(i), body="same timestamp") for i in range(5)])
+        with TemporaryDirectory() as directory:
+            archive = SQLiteArchive(Path(directory))
+            self.assertEqual(synchronize_messages(gmail, archive, old_limit=2).downloaded, 2)
+            self.assertEqual(synchronize_messages(gmail, archive, old_limit=2).downloaded, 2)
+            self.assertEqual(synchronize_messages(gmail, archive, old_limit=2).downloaded, 1)
+            with self.assertRaises(ValueError):
+                synchronize_messages(gmail, archive, old_limit=0)
+
     def test_repeated_sync_retries_failed_attachments_without_repeating_completed_work(
         self,
     ) -> None:
@@ -112,7 +193,10 @@ class SynchronizationTests(TestCase):
             )
             self.assertEqual(
                 gmail.discovery_calls,
-                [("in:inbox OR in:sent", 100, None), ("in:inbox OR in:sent", 100, "next")],
+                [
+                    ("(in:inbox OR in:sent) after:1794479399", 100, None),
+                    ("(in:inbox OR in:sent) after:1794479399", 100, "next"),
+                ],
             )
             repeated = synchronize_messages(gmail, archive)
             self.assertEqual(
@@ -147,7 +231,9 @@ class SynchronizationTests(TestCase):
                     "OPENROUTER_MODEL": "model",
                     "EMAIL_AGENT_DATA_DIR": directory,
                 },
-                stdin=StringIO("/sync\n/sync\n/search SYNC-420 --source attachment\n/exit\n"),
+                stdin=StringIO(
+                    "/sync_new\n/sync_new\n/search SYNC-420 --source attachment\n/exit\n"
+                ),
                 stdout=output,
                 stderr=StringIO(),
                 gmail_factory=lambda: gmail,
@@ -205,7 +291,7 @@ class SynchronizationTests(TestCase):
                     "OPENROUTER_MODEL": "model",
                     "EMAIL_AGENT_DATA_DIR": directory,
                 },
-                stdin=StringIO("/sync\n/exit\n"),
+                stdin=StringIO("/sync_new\n/exit\n"),
                 stdout=output,
                 stderr=StringIO(),
                 gmail_factory=lambda: gmail,
@@ -247,7 +333,7 @@ class SynchronizationTests(TestCase):
                     "OPENROUTER_MODEL": "model",
                     "EMAIL_AGENT_DATA_DIR": directory,
                 },
-                stdin=StringIO("/sync\n/help\n/exit\n"),
+                stdin=StringIO("/sync_new\n/help\n/exit\n"),
                 stdout=output,
                 stderr=StringIO(),
                 gmail_factory=lambda: gmail,
