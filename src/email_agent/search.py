@@ -94,6 +94,11 @@ class DocumentContext:
 class SearchBackend(Protocol):
     """Public retrieval boundary used by the CLI."""
 
+    @property
+    def last_indexed_attachments(self) -> int:
+        """Attachment documents successfully indexed by the last refresh."""
+        ...
+
     def refresh(self) -> int: ...
 
     def search(self, request: SearchRequest) -> list[SearchResult]: ...

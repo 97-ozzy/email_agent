@@ -56,6 +56,7 @@ class HybridSearchIndex:
         collection_namespace: str = "email_agent_sources",
     ) -> None:
         self.settings = settings
+        self.last_indexed_attachments = 0
         self.archive = archive
         self.client = client or QdrantClient(url=settings.qdrant_url)
         self.embedding_contract = {
@@ -107,6 +108,7 @@ class HybridSearchIndex:
 
     def refresh(self, *, force: bool = False) -> int:
         """Upsert changed documents and replace stale chunks before recording completion."""
+        self.last_indexed_attachments = 0
         with closing(sqlite3.connect(self.archive.database_path)) as db:
             state = dict(db.execute("SELECT document_id, fingerprint FROM email_index_state"))
         collection_exists = self.client.collection_exists(self.collection)
@@ -163,6 +165,8 @@ class HybridSearchIndex:
                 )
                 self._set_indexing_status(db, document_id, "indexed")
             changed += 1
+            if metadata["source_type"] == "attachment":
+                self.last_indexed_attachments += 1
         return changed
 
     @staticmethod

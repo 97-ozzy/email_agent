@@ -25,7 +25,12 @@ from email_agent.gmail import (
     GmailStatus,
     LiveGmail,
 )
-from email_agent.ingestion import ImportReport, import_recent_messages, retry_failed_messages
+from email_agent.ingestion import (
+    ImportReport,
+    import_recent_messages,
+    retry_failed_messages,
+    synchronize_messages,
+)
 from email_agent.search import SearchBackend, SearchRequest, SearchResult
 from email_agent.services import HttpServiceAdapter, ServiceAdapter, ServiceStatus
 
@@ -35,6 +40,7 @@ HELP_TEXT = """Supported commands:
   /help    Display supported commands
   /clear   Clear in-memory conversation history
   /status  Check Gmail, Qdrant, FastEmbed, and the embedding model
+  /sync    Archive new Inbox/Sent messages and attachments and update the local index
   /search QUERY [--limit N] [--sender ADDRESS] [--after DATE] [--before DATE]
                 [--source email|attachment] [--filename NAME] [--type pdf|docx|text|email]
             Search the persistent local hybrid index
@@ -188,6 +194,42 @@ def run_cli(
                 settings.embedding_model,
                 local_problem=local_problem,
             )
+        elif command == "/sync":
+            current_gmail = _checked_gmail_status(gmail.status)
+            if not current_gmail.available:
+                stdout.write(
+                    f"Sync unavailable: {current_gmail.problem or 'Gmail is unavailable'}.\n"
+                )
+                continue
+            stdout.write("Sync: discovering Inbox and Sent messages...\n")
+            stdout.flush()
+            try:
+                sync_report = synchronize_messages(gmail, archive, settings.attachment_max_bytes)
+                stdout.write(
+                    f"Sync: discovered {sync_report.discovered}, "
+                    f"downloaded {sync_report.downloaded}, processed {sync_report.processed}, "
+                    f"skipped {sync_report.skipped}, failed {sync_report.failed}.\n"
+                )
+                _write_attachment_report(stdout, sync_report.attachments, include_indexed=False)
+                if sync_report.failed or sync_report.attachments.failed:
+                    _write_incomplete_archive_warning(stdout)
+            except Exception:
+                stdout.write(
+                    "Sync unavailable: archival failed; completed records remain usable.\n"
+                )
+                continue
+            try:
+                backend = get_search_backend()
+                indexed = backend.refresh()
+                stdout.write(
+                    f"Sync index: indexed {indexed} documents (emails and attachments), "
+                    f"indexed attachments {backend.last_indexed_attachments}.\n"
+                )
+            except Exception:
+                stdout.write(
+                    "Sync index failed: indexing incomplete; archived sources are preserved. "
+                    "Check local retrieval services and retry /sync or /search.\n"
+                )
         elif command == "/reindex":
             try:
                 from email_agent.retrieval import HybridSearchIndex
@@ -382,11 +424,14 @@ def _write_import_report(
         _write_incomplete_archive_warning(stdout)
 
 
-def _write_attachment_report(stdout: TextIO, attachments: AttachmentReport) -> None:
+def _write_attachment_report(
+    stdout: TextIO, attachments: AttachmentReport, *, include_indexed: bool = True
+) -> None:
+    indexed = f"indexed {attachments.indexed}, " if include_indexed else ""
     stdout.write(
         "Attachments: "
         f"downloaded {attachments.downloaded}, parsed {attachments.parsed}, "
-        f"indexed {attachments.indexed}, unsupported {attachments.unsupported}, "
+        f"{indexed}unsupported {attachments.unsupported}, "
         f"oversized {attachments.oversized}, failed {attachments.failed}.\n"
     )
 

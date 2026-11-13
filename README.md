@@ -80,6 +80,7 @@ Interactive commands currently available:
 - `/help` — list supported commands
 - `/clear` - reset in-memory conversation history without changing the archive or index
 - `/status` - refresh Gmail, Qdrant, FastEmbed, and embedding-model diagnostics
+- `/sync` - archive newly discovered Inbox/Sent messages and attachments and update local search
 - `/gmail-search QUERY` - search live Gmail using Gmail search syntax
 - `/gmail-message ID` - retrieve one complete live Gmail message
 - `/gmail-thread ID` - retrieve one live Gmail conversation
@@ -88,6 +89,28 @@ Interactive commands currently available:
 The application exposes no Gmail send, draft, delete, archive, or label-modification command.
 If an existing `gmail-agent` login has a broader access level, startup replaces it with a new
 read-only authorization before Gmail becomes available.
+
+### Synchronizing the archive
+
+Run `/sync` to scan every page in the combined Inbox and Sent scope, without the initial-import
+limit. The scan includes older messages that have not yet been archived and overlaps known IDs;
+completed messages and their attachments are not downloaded or parsed again. Moving, relabeling,
+or deleting mail in Gmail does not remove archived sources or search results.
+Pending or failed attachment work is retried without downloading completed message bodies.
+
+Sync reports unique discovered messages, downloaded and processed messages, skipped known IDs,
+and discovery/download failures. Attachment counts report downloads, parsed occurrences,
+unsupported files, oversized files, and failures. The separate index count reports changed
+documents (emails plus deduplicated attachment documents) and indexed attachment documents,
+not attachment occurrences or chunks.
+Duplicate IDs across discovery pages are counted once. An unchanged, fully indexed archive
+reports zero downloads, processing, and indexing work.
+
+Sync refreshes the active FastEmbed Qwen3 index even when every Gmail ID is already known.
+An embedding-contract change rebuilds vectors from archived email and attachment text and preserves
+the previous collection. As with search/reindex, the first sync may download the embedding model.
+If indexing fails, archived sources remain available for retry through `/sync` or `/search`;
+the CLI reports incomplete indexing instead of a successful index count.
 
 ### Chat with local and live email evidence
 

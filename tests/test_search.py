@@ -159,6 +159,8 @@ class EmptyGmail:
 
 
 class ControlledSearch:
+    last_indexed_attachments = 0
+
     def __init__(self, results: list[SearchResult]) -> None:
         self.results = results
         self.requests: list[SearchRequest] = []

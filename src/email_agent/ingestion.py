@@ -1,4 +1,4 @@
-"""Deterministic initial import of recent Inbox and Sent messages."""
+"""Deterministic import and synchronization of Inbox and Sent messages."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import cast
 
 from email_agent.archive import SQLiteArchive
-from email_agent.attachments import AttachmentReport, process_message_attachments
+from email_agent.attachments import (
+    AttachmentReport,
+    process_message_attachments,
+    process_pending_attachments,
+)
 from email_agent.gmail import GmailAdapter
 
 IMPORT_QUERY = "in:inbox OR in:sent"
@@ -15,7 +19,7 @@ IMPORT_QUERY = "in:inbox OR in:sent"
 
 @dataclass(frozen=True)
 class ImportReport:
-    """Observable outcomes from one initial-import attempt."""
+    """Observable outcomes from one import or archival attempt."""
 
     requested: int
     downloaded: int
@@ -25,6 +29,37 @@ class ImportReport:
     attachments: AttachmentReport = AttachmentReport()
 
 
+@dataclass(frozen=True)
+class SyncReport:
+    """Unique discovered messages and actual archival work for one synchronization."""
+
+    discovered: int
+    downloaded: int
+    processed: int
+    failed: int
+    skipped: int
+    attachments: AttachmentReport = AttachmentReport()
+
+
+def synchronize_messages(
+    gmail: GmailAdapter,
+    archive: SQLiteArchive,
+    attachment_maximum_bytes: int = 20 * 1024 * 1024,
+) -> SyncReport:
+    """Scan all Inbox/Sent pages, retaining local sources and skipping completed IDs."""
+    pending_attachments = process_pending_attachments(gmail, archive, attachment_maximum_bytes)
+    selected, failures = _discover_messages(gmail, limit=None)
+    report = _archive_messages(gmail, archive, selected, failures, attachment_maximum_bytes)
+    return SyncReport(
+        len(selected),
+        report.downloaded,
+        report.processed,
+        report.failed,
+        report.reused,
+        pending_attachments.merge(report.attachments),
+    )
+
+
 def import_recent_messages(
     gmail: GmailAdapter,
     archive: SQLiteArchive,
@@ -32,7 +67,23 @@ def import_recent_messages(
     attachment_maximum_bytes: int = 20 * 1024 * 1024,
 ) -> ImportReport:
     """Discover, download, and archive up to ``limit`` newest unique messages."""
-    selected, discovery_failures = _discover_recent_messages(gmail, limit)
+    selected, discovery_failures = _discover_messages(gmail, limit)
+    report = _archive_messages(
+        gmail, archive, selected, discovery_failures, attachment_maximum_bytes
+    )
+    archive.mark_initial_import_attempted()
+    return ImportReport(
+        limit, report.downloaded, report.processed, report.failed, report.reused, report.attachments
+    )
+
+
+def _archive_messages(
+    gmail: GmailAdapter,
+    archive: SQLiteArchive,
+    selected: list[dict[str, object]],
+    discovery_failures: int,
+    attachment_maximum_bytes: int,
+) -> ImportReport:
     completed = archive.completed_message_ids()
     downloaded = 0
     processed = 0
@@ -50,7 +101,7 @@ def import_recent_messages(
             if not isinstance(detail, dict):
                 raise ValueError(f"Gmail returned an invalid message for {message_id}")
             downloaded += 1
-            archive.store_message({**summary, **cast(dict[str, object], detail)})
+            archive.store_message({**summary, **cast(dict[str, object], detail), "id": message_id})
             processed += 1
             attachments = attachments.merge(
                 process_message_attachments(
@@ -65,8 +116,7 @@ def import_recent_messages(
             with suppress(Exception):
                 archive.record_failure(summary, str(exc) or type(exc).__name__)
 
-    archive.mark_initial_import_attempted()
-    return ImportReport(limit, downloaded, processed, failed, reused, attachments)
+    return ImportReport(len(selected), downloaded, processed, failed, reused, attachments)
 
 
 def retry_failed_messages(
@@ -108,19 +158,19 @@ def retry_failed_messages(
     )
 
 
-def _discover_recent_messages(
-    gmail: GmailAdapter, limit: int
+def _discover_messages(
+    gmail: GmailAdapter, limit: int | None
 ) -> tuple[list[dict[str, object]], int]:
     messages_by_id: dict[str, dict[str, object]] = {}
     page_token: str | None = None
     seen_tokens: set[str] = set()
     failed = 0
 
-    while len(messages_by_id) < limit:
+    while limit is None or len(messages_by_id) < limit:
         try:
             page = gmail.list_messages(
                 IMPORT_QUERY,
-                max_results=min(100, max(1, limit - len(messages_by_id))),
+                max_results=100 if limit is None else min(100, max(1, limit - len(messages_by_id))),
                 page_token=page_token,
             )
             if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
