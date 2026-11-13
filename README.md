@@ -89,21 +89,26 @@ The application exposes no Gmail send, draft, delete, archive, or label-modifica
 If an existing `gmail-agent` login has a broader access level, startup replaces it with a new
 read-only authorization before Gmail becomes available.
 
-### Chat with the local archive
+### Chat with local and live email evidence
 
 Type a natural-language question at the prompt. Pydantic AI uses `OPENROUTER_MODEL` through
-OpenRouter and can repeatedly call `search_email_rag` and `get_local_document` to investigate.
-The first question checks credentials and the model's advertised tool support before initializing
-retrieval. Provider routing requires support for the requested parameters. Errors leave the
+OpenRouter and can choose local search/context tools, live Gmail search, complete messages,
+or complete threads. Recent changes are checked live; older correspondence outside the
+archive can also be read live. The first question checks credentials and the model's
+advertised tool support. Local embedding and index initialization are deferred until a local
+tool is used. Provider routing requires support for the requested parameters. Errors leave the
 terminal commands available.
 
 Answers are instructed to cite messages as `[message:ID]`, with attachment IDs, filenames,
 and chunk IDs for attachment claims; identify conflicting evidence; and disclose missing evidence.
-Local search covers only the archived subset. Chat does not search live Gmail yet.
+Answers identify local-index versus live Gmail evidence and cite message/thread IDs.
+Local search covers only the archived subset. Live reads stay in the in-memory conversation
+and do not expand the persistent archive. If Gmail is unavailable, local answers remain usable
+and disclose that live coverage could not be checked.
 Email and attachment contents are treated as untrusted source data, including embedded instructions.
 Retrieval scores are relevance rankings, not probabilities that a claim is true.
 
-`EMAIL_AGENT_TOOL_CALL_LIMIT` defaults to 10 actual retrieval calls per question. When exhausted,
+`EMAIL_AGENT_TOOL_CALL_LIMIT` defaults to 10 actual local/live tool calls per question. When exhausted,
 the agent receives no further retrieval tools and the CLI adds a partial-answer notice.
 If final synthesis fails after that limit, cited source excerpts remain available as a fallback.
 A separate bounded model-request budget prevents repeated invalid tool requests from looping.
@@ -115,6 +120,17 @@ OpenRouter receives the question, retained conversation, and selected retrieved 
 passages. Source files and the vector index remain local. Controlled-model tests exercise the
 real local archive/index with mocked embeddings and local Qdrant; they verify orchestration and
 policy delivery, and do not establish live-model answer quality or universal injection resistance.
+
+Live chat tools use `gmail-agent mcp --read-only` over stdio. Only search, message, and
+thread reads are exposed to the agent. Each read starts and closes its MCP session.
+Verified installed interfaces: gmail-agent 0.3.1, MCP SDK 2.3.0 (`ClientSession`, stdio,
+structured tool results), and pydantic-ai-slim 1.107.10 (`Agent.tool`, dynamic instructions,
+shared investigation limits). Complete reads pass `max_body_chars=0`.
+Pydantic AI's bundled MCP client currently fails to import with the installed MCP 2.3.0
+(`RequestContext` was removed), so these tools use the official MCP SDK directly.
+Tests exercise the real gmail-agent MCP server with a synthetic Gmail client over stdio,
+plus CLI flows with a controlled model and Gmail adapter. They verify tool execution and
+policy instructions, not real-model source-selection reliability or live-account acceptance.
 
 ## Troubleshooting
 
@@ -157,26 +173,6 @@ trustworthy page boundaries. Reindexing reuses extracted text without downloadin
 attachments again.
 
 ### Running checks
-
-Chat can choose local retrieval, live Gmail search, complete messages, or complete threads.
-For recent changes it is instructed to check live Gmail; older correspondence outside the
-archive can also be read live. Answers identify local-index versus live Gmail evidence and
-cite message/thread IDs. Live reads stay in the in-memory conversation and do not expand
-the persistent archive. If Gmail is unavailable, local answers remain usable and disclose
-that live coverage could not be checked. Selected live correspondence is sent to OpenRouter
-as tool evidence, just like selected local passages.
-
-Live chat tools use `gmail-agent mcp --read-only` over stdio. Only search, message, and
-thread reads are exposed to the agent. Each read starts and closes its MCP session;
-local embedding and index initialization are deferred until a local tool is used.
-Verified installed interfaces: gmail-agent 0.3.1, MCP SDK 2.3.0 (`ClientSession`, stdio,
-structured tool results), and pydantic-ai-slim 1.107.10 (`Agent.tool`, dynamic instructions,
-shared investigation limits). Complete reads pass `max_body_chars=0`.
-Pydantic AI's bundled MCP client currently fails to import with the installed MCP 2.3.0
-(`RequestContext` was removed), so these tools use the official MCP SDK directly.
-Tests exercise the real gmail-agent MCP server with a synthetic Gmail client over stdio,
-plus CLI flows with a controlled model and Gmail adapter. They verify tool execution and
-policy instructions, not real-model source-selection reliability or live-account acceptance.
 
 The CLI/application tests use controlled service adapters and do not require Docker or secrets:
 

@@ -46,7 +46,13 @@ class OpenRouterTests(TestCase):
             self.assertEqual(payload["tool_choice"], "auto")
             self.assertEqual(
                 {t["function"]["name"] for t in payload["tools"]},
-                {"search_email_rag", "get_local_document"},
+                {
+                    "search_email_rag",
+                    "get_local_document",
+                    "search_gmail",
+                    "get_gmail_message",
+                    "get_gmail_thread",
+                },
             )
             if "parallel_tool_calls" in payload:
                 return httpx.Response(
